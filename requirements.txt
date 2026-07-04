@@ -1,0 +1,5 @@
+# Only needed to (re)build graph.json from roads.geojson  ->  `make graph`
+# The app itself (index.html) is 100% static and needs none of these.
+osmnx>=1.9
+geopandas>=0.14
+shapely>=2.0

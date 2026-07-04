@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Bike Router</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--ink:#e2e8f0;--muted:#94a3b8;--accent:#f59e0b}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  #map{position:absolute;inset:0}
+  .panel{position:absolute;z-index:1000;left:10px;right:10px;bottom:10px;
+    background:var(--panel);color:var(--ink);border-radius:14px;padding:10px 12px;
+    box-shadow:0 8px 30px rgba(0,0,0,.45);display:flex;flex-direction:column;gap:8px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .hint{color:var(--muted);font-size:13px;line-height:1.3;flex:1 1 100%}
+  button{background:#334155;color:var(--ink);border:0;border-radius:9px;
+    padding:9px 12px;font-size:14px;font-weight:600;cursor:pointer}
+  button:active{transform:translateY(1px)}
+  button.primary{background:var(--accent);color:#111}
+  button:disabled{opacity:.4}
+  .legend{position:absolute;z-index:1000;top:10px;left:10px;background:var(--panel);
+    color:var(--ink);border-radius:12px;padding:8px 10px;font-size:12px;line-height:1.7;
+    box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .sw{display:inline-block;width:11px;height:3px;border-radius:2px;
+    vertical-align:middle;margin-right:6px}
+  .stat{font-size:13px;color:var(--muted)}
+  .stat b{color:var(--ink)}
+  label.toggle{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="legend" id="legend"></div>
+<div class="panel">
+  <div class="row">
+    <button id="loc" class="primary">📍 Route from here</button>
+    <button id="reset">Reset</button>
+    <button id="gpx" disabled>⬇ GPX</button>
+    <label class="toggle"><input type="checkbox" id="showAll" checked> show all roads</label>
+  </div>
+  <div class="row"><div class="stat" id="stat">Loading network…</div></div>
+  <div class="hint" id="hint">Tap a start, then a destination.</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ---------- config ----------
+const GRAPH_URL = "./graph.json";
+const MIN_MULT = 0.35;               // best discount → keeps A* heuristic admissible
+const CLASS = [
+  {name:"Dedicated bike road", color:"#22c55e"},
+  {name:"Bike lane",           color:"#3b82f6"},
+  {name:"Bike-friendly road",  color:"#38bdf8"},
+  {name:"Other road",          color:"#94a3b8"},
+  {name:"Hostile (big road)",  color:"#ef4444"},
+];
+// ---------- state ----------
+let NODES=[], EDGES=[], ADJ=[];
+let origin=null, dest=null, oMarker=null, dMarker=null, routeLine=null, lastRoute=null;
+let netLayer=null, meMarker=null;
+
+const map = L.map("map",{preferCanvas:true, zoomControl:true}).setView([31.77,35.21],13);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(map);
+
+// legend
+document.getElementById("legend").innerHTML = CLASS.map(c=>
+  `<div><span class="sw" style="background:${c.color}"></span>${c.name}</div>`).join("");
+
+// ---------- min-heap ----------
+class Heap{constructor(){this.a=[];}
+ push(p,v){const a=this.a;a.push([p,v]);let i=a.length-1;while(i>0){const par=(i-1)>>1;if(a[par][0]<=a[i][0])break;[a[par],a[i]]=[a[i],a[par]];i=par;}}
+ pop(){const a=this.a;const top=a[0];const last=a.pop();if(a.length){a[0]=last;let i=0;for(;;){let l=2*i+1,r=l+1,s=i;if(l<a.length&&a[l][0]<a[s][0])s=l;if(r<a.length&&a[r][0]<a[s][0])s=r;if(s===i)break;[a[s],a[i]]=[a[i],a[s]];i=s;}}return top;}
+ get size(){return this.a.length;}}
+
+// ---------- geo helpers ----------
+const toR=Math.PI/180, RE=6371000;
+function hav(aLat,aLng,bLat,bLng){
+  const dLat=(bLat-aLat)*toR,dLng=(bLng-aLng)*toR;
+  const s=Math.sin(dLat/2)**2+Math.cos(aLat*toR)*Math.cos(bLat*toR)*Math.sin(dLng/2)**2;
+  return 2*RE*Math.asin(Math.sqrt(s));
+}
+function nearest(lat,lng){
+  let best=-1,bd=Infinity;const cw=Math.cos(lat*toR);
+  for(let i=0;i<NODES.length;i++){const dy=NODES[i][0]-lat,dx=(NODES[i][1]-lng)*cw;
+    const d=dy*dy+dx*dx;if(d<bd){bd=d;best=i;}}
+  return best;
+}
+function h(u,v){return hav(NODES[u][0],NODES[u][1],NODES[v][0],NODES[v][1])*MIN_MULT;}
+
+// ---------- A* ----------
+function astar(src,dst){
+  const n=NODES.length;
+  const g=new Float64Array(n).fill(Infinity);
+  const came=new Int32Array(n).fill(-1);
+  const cameEdge=new Int32Array(n).fill(-1);
+  const closed=new Uint8Array(n);
+  g[src]=0; const open=new Heap(); open.push(h(src,dst),src);
+  while(open.size){
+    const [,u]=open.pop(); if(closed[u])continue; closed[u]=1; if(u===dst)break;
+    const nb=ADJ[u]; for(let j=0;j<nb.length;j++){
+      const v=nb[j][0],cost=nb[j][1],ei=nb[j][2]; if(closed[v])continue;
+      const ng=g[u]+cost;
+      if(ng<g[v]){g[v]=ng;came[v]=u;cameEdge[v]=ei;open.push(ng+h(v,dst),v);}
+    }
+  }
+  if(g[dst]===Infinity)return null;
+  const seq=[]; let cur=dst; while(cur!==src){seq.push(cameEdge[cur]);cur=came[cur];} seq.reverse();
+  let line=[]; for(const ei of seq){let c=EDGES[ei][4]; if(line.length)c=c.slice(1); line=line.concat(c);}
+  // real distance = haversine along the drawn polyline
+  let meters=0; for(let i=1;i<line.length;i++) meters+=hav(line[i-1][0],line[i-1][1],line[i][0],line[i][1]);
+  return {line, meters, cost:g[dst]};
+}
+
+// ---------- rendering ----------
+function drawNetwork(){
+  if(netLayer) netLayer.remove();
+  const showAll=document.getElementById("showAll").checked;
+  const feats=[];
+  for(const e of EDGES){
+    const code=e[3];
+    if(!showAll && code>=3) continue;              // hide plain/hostile roads
+    feats.push(L.polyline(e[4],{color:CLASS[code].color,weight:code<=2?3:1.5,
+      opacity:code<=2?0.9:0.5,interactive:false}));
+  }
+  netLayer=L.layerGroup(feats).addTo(map);
+  if(routeLine) routeLine.bringToFront();
+}
+
+function setEndpoint(latlng){
+  const i=nearest(latlng.lat,latlng.lng);
+  const p=L.latLng(NODES[i][0],NODES[i][1]);
+  if(origin===null){
+    origin=i; oMarker=L.circleMarker(p,{radius:8,color:"#111",weight:2,fillColor:"#22c55e",fillOpacity:1}).addTo(map);
+    hint("Now tap a destination.");
+  }else if(dest===null){
+    dest=i; dMarker=L.circleMarker(p,{radius:8,color:"#111",weight:2,fillColor:"#ef4444",fillOpacity:1}).addTo(map);
+    route();
+  }else{ resetRoute(); setEndpoint(latlng); }
+}
+
+function route(){
+  const t0=performance.now();
+  const r=astar(origin,dest);
+  if(!r){hint("No route found — is your area connected?");return;}
+  lastRoute=r;
+  if(routeLine)routeLine.remove();
+  routeLine=L.polyline(r.line,{color:"#f59e0b",weight:6,opacity:0.95}).addTo(map);
+  map.fitBounds(routeLine.getBounds(),{padding:[40,40]});
+  document.getElementById("gpx").disabled=false;
+  const ms=(performance.now()-t0).toFixed(0);
+  document.getElementById("stat").innerHTML =
+    `<b>${(r.meters/1000).toFixed(2)} km</b> · comfort-weighted ${(r.cost/1000).toFixed(2)} · ${ms} ms`;
+  hint("Tap again to start a new route, or export GPX.");
+}
+
+// ---------- GPX (import into OsmAnd for turn-by-turn) ----------
+function toGPX(line){
+  const pts=line.map(([la,lo])=>`<trkpt lat="${la}" lon="${lo}"/>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="bike-router" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><name>bike route</name><trkseg>${pts}</trkseg></trk></gpx>`;
+}
+
+// ---------- ui wiring ----------
+function hint(t){document.getElementById("hint").textContent=t;}
+function resetRoute(){
+  origin=dest=null;
+  [oMarker,dMarker,routeLine].forEach(m=>m&&m.remove());
+  oMarker=dMarker=routeLine=null; lastRoute=null;
+  document.getElementById("gpx").disabled=true;
+  hint("Tap a start, then a destination.");
+}
+map.on("click",e=>setEndpoint(e.latlng));
+document.getElementById("reset").onclick=resetRoute;
+document.getElementById("showAll").onchange=drawNetwork;
+document.getElementById("gpx").onclick=()=>{
+  if(!lastRoute)return;
+  const blob=new Blob([toGPX(lastRoute.line)],{type:"application/gpx+xml"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+  a.download="bike-route.gpx";a.click();
+};
+document.getElementById("loc").onclick=()=>{
+  if(!navigator.geolocation){hint("No geolocation available.");return;}
+  navigator.geolocation.getCurrentPosition(pos=>{
+    const {latitude:la,longitude:lo}=pos.coords;
+    if(!meMarker){meMarker=L.circleMarker([la,lo],{radius:6,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);}
+    else meMarker.setLatLng([la,lo]);
+    map.setView([la,lo],15);
+    resetRoute(); setEndpoint(L.latLng(la,lo));
+  },()=>hint("Couldn't get your location (needs HTTPS + permission)."),{enableHighAccuracy:true});
+};
+
+// ---------- load ----------
+fetch(GRAPH_URL).then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
+ .then(d=>{
+   NODES=d.nodes; EDGES=d.edges;
+   ADJ=NODES.map(()=>[]);
+   EDGES.forEach((e,i)=>ADJ[e[0]].push([e[1],e[2],i]));
+   drawNetwork();
+   if(EDGES.length){ // center on data
+     const b=L.latLngBounds(EDGES[0][4]); for(const e of EDGES)e[4].forEach(c=>b.extend(c));
+     map.fitBounds(b,{padding:[20,20]});
+   }
+   document.getElementById("stat").innerHTML=
+     `<b>${NODES.length}</b> nodes · <b>${EDGES.length}</b> edges loaded`;
+ })
+ .catch(err=>{document.getElementById("stat").textContent=
+   "Failed to load graph.json ("+err.message+"). Put it next to index.html.";});
+
+// optional offline caching
+if("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <g fill="none" stroke="#f59e0b" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="150" cy="342" r="80"/>
+    <circle cx="362" cy="342" r="80"/>
+    <!-- frame -->
+    <path d="M150 342 L238 198"/>   <!-- rear triangle -->
+    <path d="M150 342 L250 342"/>   <!-- chainstay -->
+    <path d="M250 342 L238 198"/>   <!-- seat tube -->
+    <path d="M238 198 L330 198"/>   <!-- top tube -->
+    <path d="M250 342 L330 198"/>   <!-- down tube -->
+    <path d="M362 342 L330 198"/>   <!-- fork -->
+    <!-- handlebar, seat, crank -->
+    <path d="M312 190 L350 190"/>
+    <path d="M220 190 L256 198"/>
+    <path d="M250 342 L232 372"/>
+  </g>
+</svg>
