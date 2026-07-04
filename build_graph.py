@@ -49,6 +49,12 @@ HOSTILE_HIGHWAYS = {
 }
 HOSTILE_MULT = 4.0
 
+# Specific roads to avoid, matched by OSM street name (substring). These are
+# forced hostile regardless of highway type or any class in roads.geojson.
+DANGEROUS_NAMES = {
+    "מטודלה",            # Metudela St, Jerusalem
+}
+
 # Colour codes consumed by the frontend legend.
 CODE = {"dedicated": 0, "lane": 1, "friendly": 2, "other": 3, "hostile": 4}
 # ---------------------------------------------------------------------------
@@ -144,6 +150,15 @@ def classify(G, class_gdf, buffer_m):
     return out
 
 
+def is_dangerous(d):
+    """True if the edge's OSM name matches DANGEROUS_NAMES (substring)."""
+    nm = d.get("name")
+    for n in (nm if isinstance(nm, list) else [nm]):
+        if isinstance(n, str) and any(t in n for t in DANGEROUS_NAMES):
+            return True
+    return False
+
+
 def build_export(G, klass_by_key):
     node_ids = list(G.nodes)
     idx = {n: i for i, n in enumerate(node_ids)}
@@ -151,12 +166,17 @@ def build_export(G, klass_by_key):
              for n in node_ids]
 
     edges_out, dist = [], {c: 0.0 for c in list(CLASS_MULT) + ["hostile"]}
+    n_dangerous = 0
     # osmnx edges are directed: a two-way street is two reciprocal edges, a
     # oneway is one. Emitting them as-is encodes legal direction for free.
     for u, v, k, d in G.edges(keys=True, data=True):
         a, b = idx[u], idx[v]
         length = float(d.get("length", 0.0) or 0.0)
-        klass = klass_by_key.get((u, v, k))
+        if is_dangerous(d):
+            klass = "hostile"
+            n_dangerous += 1
+        else:
+            klass = klass_by_key.get((u, v, k))
         if klass is None:
             hw = d.get("highway")
             hw = hw[0] if isinstance(hw, list) else hw
@@ -172,6 +192,8 @@ def build_export(G, klass_by_key):
             coords = [nodes[a], nodes[b]]
         edges_out.append([a, b, cost, CODE[klass], coords])
 
+    if DANGEROUS_NAMES:
+        print(f"  dangerous-name edges forced hostile: {n_dangerous}")
     return {"nodes": nodes, "edges": edges_out}, dist
 
 
