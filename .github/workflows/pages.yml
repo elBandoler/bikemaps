@@ -24,6 +24,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # branch tip at run time, not the SHA snapshotted when the run was
+          # queued — a dispatch fired right after the graph-rebuild push could
+          # otherwise deploy the commit *before* the new graph.json
+          ref: ${{ github.ref_name }}
       - uses: actions/configure-pages@v5
         with:
           enablement: true
