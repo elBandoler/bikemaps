@@ -55,6 +55,13 @@ DANGEROUS_NAMES = {
     "מטודלה",            # Metudela St, Jerusalem
 }
 
+# Roads that must NOT inherit a bike class (exact OSM name match, so יהודה
+# does not catch בן יהודה etc.). Any classification from roads.geojson or the
+# spatial join is stripped; the edge falls back to plain/hostile-by-highway.
+UNCLASSIFY_NAMES = {
+    "יהודה",             # Yehuda St, Jerusalem
+}
+
 # Colour codes consumed by the frontend legend.
 CODE = {"dedicated": 0, "lane": 1, "friendly": 2, "other": 3, "hostile": 4}
 # ---------------------------------------------------------------------------
@@ -150,13 +157,18 @@ def classify(G, class_gdf, buffer_m):
     return out
 
 
-def is_dangerous(d):
-    """True if the edge's OSM name matches DANGEROUS_NAMES (substring)."""
+def name_matches(d, tokens, exact):
+    """True if the edge's OSM name matches tokens (exact or substring)."""
     nm = d.get("name")
     for n in (nm if isinstance(nm, list) else [nm]):
-        if isinstance(n, str) and any(t in n for t in DANGEROUS_NAMES):
-            return True
+        if isinstance(n, str):
+            if (n in tokens) if exact else any(t in n for t in tokens):
+                return True
     return False
+
+
+def is_dangerous(d):
+    return name_matches(d, DANGEROUS_NAMES, exact=False)
 
 
 def build_export(G, klass_by_key):
@@ -166,7 +178,7 @@ def build_export(G, klass_by_key):
              for n in node_ids]
 
     edges_out, dist = [], {c: 0.0 for c in list(CLASS_MULT) + ["hostile"]}
-    n_dangerous = 0
+    n_dangerous = n_unclassified = 0
     # osmnx edges are directed: a two-way street is two reciprocal edges, a
     # oneway is one. Emitting them as-is encodes legal direction for free.
     for u, v, k, d in G.edges(keys=True, data=True):
@@ -177,6 +189,9 @@ def build_export(G, klass_by_key):
             n_dangerous += 1
         else:
             klass = klass_by_key.get((u, v, k))
+            if klass is not None and name_matches(d, UNCLASSIFY_NAMES, exact=True):
+                klass = None
+                n_unclassified += 1
         if klass is None:
             hw = d.get("highway")
             hw = hw[0] if isinstance(hw, list) else hw
@@ -194,6 +209,8 @@ def build_export(G, klass_by_key):
 
     if DANGEROUS_NAMES:
         print(f"  dangerous-name edges forced hostile: {n_dangerous}")
+    if UNCLASSIFY_NAMES:
+        print(f"  unclassify-name edges stripped of bike class: {n_unclassified}")
     return {"nodes": nodes, "edges": edges_out}, dist
 
 
