@@ -62,6 +62,7 @@ DANGEROUS_NAMES = {
 UNCLASSIFY_NAMES = {
     "יהודה",             # Yehuda St, Jerusalem
     "דרך בית לחם",       # Derech Beit Lechem, Jerusalem
+    "בית לחם",           # ways of the same road OSM names without the דרך
 }
 
 # Colour codes consumed by the frontend legend. (5 was added later; 0-4 are
