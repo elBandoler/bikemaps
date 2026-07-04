@@ -151,7 +151,7 @@ const BIKE_KMH = 15;                 // for ETA display
 const OFFROUTE_M = 60;               // metres off the line before we re-route
 const ARRIVE_M = 30;
 const ALT_PENALTY = 2.0;             // cost factor on used edges when hunting an alternative
-const MULT = [0.35, 0.55, 0.75, 1.0, 4.0];   // must mirror build_graph.py
+const MULT = [0.35, 0.55, 0.60, 1.0, 4.0];   // must mirror build_graph.py
 const CLASS = [
   {name:"Dedicated bike road", color:"#22c55e"},
   {name:"Bike lane",           color:"#3b82f6"},
@@ -246,19 +246,21 @@ $("legend").innerHTML = CLASS.map(c=>
   `<div><span class="sw" style="background:${c.color}"></span>${c.name}</div>`).join("")+
   `<label><input type="checkbox" id="allRoadsChk"> show all roads</label>`;
 
+let altLayer=[];   // every drawn route line lives here, whatever happens to ALTS
+function clearAltLines(){altLayer.forEach(l=>l.remove());altLayer=[];ALTS.forEach(r=>r._pl=null);}
 function drawAlts(onlySelected){
-  ALTS.forEach(r=>{if(r._pl){r._pl.remove();r._pl=null;}});
+  clearAltLines();
   for(const r of ALTS){
     if(onlySelected&&r.key!==selKey)continue;
     const sel=r.key===selKey;
     r._pl=L.polyline(r.line,{color:sel?"#8b5cf6":"#5b6b8c",weight:sel?7:5,
       opacity:sel?0.95:0.7}).addTo(map);
     if(!sel)r._pl.on("click",()=>selectAlt(r.key));
+    altLayer.push(r._pl);
   }
   const s=ALTS.find(r=>r.key===selKey);
   if(s&&s._pl)s._pl.bringToFront();
 }
-function clearAltLines(){ALTS.forEach(r=>{if(r._pl){r._pl.remove();r._pl=null;}});}
 
 // ---------- UI helpers ----------
 function hint(t,ms){$("hintTxt").textContent=t;$("hint").style.display=t?"block":"none";
@@ -303,6 +305,7 @@ function tryRoute(){
   if(navWatch!==null){ // re-route while navigating: single route in the chosen style
     const r=astar(origin,dest,selKey==="short"?"length":"cost");
     if(!r){hint("No route found.",4000);return;}
+    clearAltLines();
     r.key=selKey; ALTS=[r]; lastRoute=r; buildCum(); drawAlts(true);
     const min=etaMin(r.meters);
     $("navMin").textContent=min;
@@ -310,8 +313,10 @@ function tryRoute(){
     hint("Re-routed",2500);
     return;
   }
+  clearAltLines();
   ALTS=computeAlts(origin,dest);
   if(!ALTS.length){hint("No route found between these points.",5000);return;}
+  selKey="bike";   // every new query starts from the bike-priority route
   if(!ALTS.some(r=>r.key===selKey))selKey=ALTS[0].key;
   lastRoute=ALTS.find(r=>r.key===selKey); buildCum();
   drawAlts(false); updateSheet(); showSuggestions([]);

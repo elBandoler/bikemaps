@@ -38,7 +38,7 @@ from shapely.geometry import box
 CLASS_MULT = {
     "dedicated": 0.35,   # separated bike road / protected path
     "lane":      0.55,   # painted lane on a normal road
-    "friendly":  0.75,   # normal road that's simply nice to ride
+    "friendly":  0.60,   # normal road that's simply nice to ride
     "other":     1.00,   # baseline: everything else rideable
 }
 # Big roads with no bike class: discouraged hard but NOT removed (keeps graph
