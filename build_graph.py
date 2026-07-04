@@ -61,6 +61,7 @@ DANGEROUS_NAMES = {
 # spatial join is stripped; the edge falls back to plain/hostile-by-highway.
 UNCLASSIFY_NAMES = {
     "יהודה",             # Yehuda St, Jerusalem
+    "דרך בית לחם",       # Derech Beit Lechem, Jerusalem
 }
 
 # Colour codes consumed by the frontend legend. (5 was added later; 0-4 are
