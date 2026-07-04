@@ -36,7 +36,8 @@ from shapely.geometry import box
 # ---- cost model — these are your aggression knobs -------------------------
 # Multiplier on segment length (metres). Lower = more attractive to the router.
 CLASS_MULT = {
-    "dedicated": 0.35,   # separated bike road / protected path
+    "dedicated": 0.35,   # separated bike road / protected path (my classification)
+    "cycleway":  0.45,   # OSM highway=cycleway not covered by my classification
     "lane":      0.55,   # painted lane on a normal road
     "friendly":  0.60,   # normal road that's simply nice to ride
     "other":     1.00,   # baseline: everything else rideable
@@ -62,8 +63,10 @@ UNCLASSIFY_NAMES = {
     "יהודה",             # Yehuda St, Jerusalem
 }
 
-# Colour codes consumed by the frontend legend.
-CODE = {"dedicated": 0, "lane": 1, "friendly": 2, "other": 3, "hostile": 4}
+# Colour codes consumed by the frontend legend. (5 was added later; 0-4 are
+# frozen so old graphs keep rendering.)
+CODE = {"dedicated": 0, "lane": 1, "friendly": 2, "other": 3, "hostile": 4,
+        "cycleway": 5}
 # ---------------------------------------------------------------------------
 
 ID_COLS = ("osm_way_id", "osm_id", "osmid", "@id", "way_id", "id")
@@ -178,12 +181,14 @@ def build_export(G, klass_by_key):
              for n in node_ids]
 
     edges_out, dist = [], {c: 0.0 for c in list(CLASS_MULT) + ["hostile"]}
-    n_dangerous = n_unclassified = 0
+    n_dangerous = n_unclassified = n_cycleway = 0
     # osmnx edges are directed: a two-way street is two reciprocal edges, a
     # oneway is one. Emitting them as-is encodes legal direction for free.
     for u, v, k, d in G.edges(keys=True, data=True):
         a, b = idx[u], idx[v]
         length = float(d.get("length", 0.0) or 0.0)
+        hw = d.get("highway")
+        hws = hw if isinstance(hw, list) else [hw]
         if is_dangerous(d):
             klass = "hostile"
             n_dangerous += 1
@@ -192,10 +197,13 @@ def build_export(G, klass_by_key):
             if klass is not None and name_matches(d, UNCLASSIFY_NAMES, exact=True):
                 klass = None
                 n_unclassified += 1
+            # any OSM cycleway I didn't mark as bike road/lane rides as its own
+            # "unclassified cycleway" class — better than friendly streets
+            if "cycleway" in hws and klass not in ("dedicated", "lane"):
+                klass = "cycleway"
+                n_cycleway += 1
         if klass is None:
-            hw = d.get("highway")
-            hw = hw[0] if isinstance(hw, list) else hw
-            klass = "hostile" if hw in HOSTILE_HIGHWAYS else "other"
+            klass = "hostile" if any(h in HOSTILE_HIGHWAYS for h in hws) else "other"
         mult = HOSTILE_MULT if klass == "hostile" else CLASS_MULT[klass]
         cost = round(length * mult, 2)
         dist[klass] += length
@@ -211,6 +219,7 @@ def build_export(G, klass_by_key):
         print(f"  dangerous-name edges forced hostile: {n_dangerous}")
     if UNCLASSIFY_NAMES:
         print(f"  unclassify-name edges stripped of bike class: {n_unclassified}")
+    print(f"  unclassified-cycleway edges: {n_cycleway}")
     return {"nodes": nodes, "edges": edges_out}, dist
 
 

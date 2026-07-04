@@ -151,13 +151,14 @@ const BIKE_KMH = 15;                 // for ETA display
 const OFFROUTE_M = 60;               // metres off the line before we re-route
 const ARRIVE_M = 30;
 const ALT_PENALTY = 2.0;             // cost factor on used edges when hunting an alternative
-const MULT = [0.35, 0.55, 0.60, 1.0, 4.0];   // must mirror build_graph.py
+const MULT = [0.35, 0.55, 0.60, 1.0, 4.0, 0.45];   // must mirror build_graph.py CODE order
 const CLASS = [
-  {name:"Dedicated bike road", color:"#22c55e"},
-  {name:"Bike lane",           color:"#3b82f6"},
-  {name:"Bike-friendly road",  color:"#38bdf8"},
+  {name:"Dedicated bike road", color:"#22c55e", bike:true},
+  {name:"Bike lane",           color:"#3b82f6", bike:true},
+  {name:"Bike-friendly road",  color:"#38bdf8", bike:true},
   {name:"Other road",          color:"#94a3b8"},
   {name:"Hostile (big road)",  color:"#ef4444"},
+  {name:"Cycleway (unclassified)", color:"#2dd4bf", bike:true},
 ];
 const LABEL={bike:"Bike priority", short:"Shortest", alt:"Alternative"};
 // ---------- state ----------
@@ -234,10 +235,10 @@ function drawNetwork(){
   if(!showNet)return;
   const feats=[];
   for(const e of EDGES){
-    const code=e[3];
-    if(!showAllRoads && code>=3) continue;
-    feats.push(L.polyline(e[4],{color:CLASS[code].color,weight:code<=2?3:1.5,
-      opacity:code<=2?0.85:0.45,interactive:false}));
+    const code=e[3], bike=!!CLASS[code].bike;
+    if(!showAllRoads && !bike) continue;
+    feats.push(L.polyline(e[4],{color:CLASS[code].color,weight:bike?3:1.5,
+      opacity:bike?0.85:0.45,interactive:false}));
   }
   netLayer=L.layerGroup(feats).addTo(map);
   ALTS.forEach(r=>r._pl&&r._pl.bringToFront());
@@ -573,7 +574,7 @@ fetch(GRAPH_URL).then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
    drawNetwork();
    if(EDGES.length){ // center on the bike infrastructure, not the whole padded bbox
      let b=null;
-     for(const e of EDGES){if(e[3]<=2){if(!b)b=L.latLngBounds(e[4]);e[4].forEach(c=>b.extend(c));}}
+     for(const e of EDGES){if(CLASS[e[3]].bike){if(!b)b=L.latLngBounds(e[4]);e[4].forEach(c=>b.extend(c));}}
      if(!b){b=L.latLngBounds(EDGES[0][4]);for(const e of EDGES)e[4].forEach(c=>b.extend(c));}
      map.fitBounds(b,{padding:[20,20]});
    }

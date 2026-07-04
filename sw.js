@@ -2,7 +2,7 @@
 // geocoders are cross-origin and pass straight through to the network.
 // Same-origin requests are network-first (so app/graph updates arrive) with
 // cache fallback for offline.
-const C = "bike-v6";
+const C = "bike-v7";
 const ASSETS = [
   "./",
   "./index.html",
