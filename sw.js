@@ -1,6 +1,8 @@
-// Caches the app shell so the router loads offline. Map tiles and the Leaflet
-// CDN are cross-origin and pass straight through to the network (no offline map).
-const C = "bike-v1";
+// Caches the app shell so the router loads offline. Map tiles, Leaflet CDN and
+// geocoders are cross-origin and pass straight through to the network.
+// Same-origin requests are network-first (so app/graph updates arrive) with
+// cache fallback for offline.
+const C = "bike-v2";
 const ASSETS = [
   "./",
   "./index.html",
@@ -18,15 +20,20 @@ self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys().then((ks) =>
       Promise.all(ks.filter((k) => k !== C).map((k) => caches.delete(k)))
-    )
+    ).then(() => self.clients.claim())
   );
 });
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  if (url.origin === location.origin) {
-    // cache-first for our own files
-    e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
-  }
-  // cross-origin (tiles, Leaflet) -> let the browser hit the network normally
+  if (url.origin !== location.origin || e.request.method !== "GET") return;
+  e.respondWith(
+    fetch(e.request)
+      .then((r) => {
+        const copy = r.clone();
+        caches.open(C).then((c) => c.put(e.request, copy));
+        return r;
+      })
+      .catch(() => caches.match(e.request))
+  );
 });

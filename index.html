@@ -8,10 +8,35 @@
 <title>Bike Router</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
-  :root{--bg:#0f172a;--panel:#1e293b;--ink:#e2e8f0;--muted:#94a3b8;--accent:#f59e0b}
+  :root{--bg:#0f172a;--panel:#1e293b;--field:#0b1220;--ink:#e2e8f0;--muted:#94a3b8;--accent:#f59e0b}
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
   #map{position:absolute;inset:0}
+  /* --- address search (top) --- */
+  .search{position:absolute;z-index:1100;top:10px;left:10px;right:10px;max-width:480px;
+    background:var(--panel);color:var(--ink);border-radius:14px;padding:8px;
+    box-shadow:0 8px 30px rgba(0,0,0,.45);display:flex;flex-direction:column;gap:6px}
+  .inputRow{display:flex;align-items:center;gap:8px;background:var(--field);border-radius:9px;padding:2px 10px}
+  .inputRow .dot{width:10px;height:10px;border-radius:50%;flex:none}
+  .dot.start{background:#22c55e}.dot.end{background:#ef4444}
+  .inputRow input{flex:1;min-width:0;background:transparent;border:0;color:var(--ink);
+    font-size:14px;padding:9px 0;outline:none}
+  .inputRow input::placeholder{color:var(--muted)}
+  .inputRow .clear{background:none;border:0;color:var(--muted);font-size:15px;padding:4px;cursor:pointer}
+  #suggest{background:var(--field);border-radius:10px;max-height:38vh;overflow:auto;display:none}
+  .sug{padding:9px 12px;font-size:13px;line-height:1.35;cursor:pointer}
+  .sug+.sug{border-top:1px solid #1c2942}
+  .sug:hover,.sug.active{background:#1c2942}
+  .sug small{color:var(--muted);display:block}
+  /* keep leaflet zoom control clear of the search bar */
+  .leaflet-top.leaflet-left{top:112px}
+  /* --- legend (right, under search on phones) --- */
+  .legend{position:absolute;z-index:1000;top:118px;right:10px;background:var(--panel);
+    color:var(--ink);border-radius:12px;padding:8px 10px;font-size:12px;line-height:1.7;
+    box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .sw{display:inline-block;width:11px;height:3px;border-radius:2px;
+    vertical-align:middle;margin-right:6px}
+  /* --- bottom panel --- */
   .panel{position:absolute;z-index:1000;left:10px;right:10px;bottom:10px;
     background:var(--panel);color:var(--ink);border-radius:14px;padding:10px 12px;
     box-shadow:0 8px 30px rgba(0,0,0,.45);display:flex;flex-direction:column;gap:8px}
@@ -21,29 +46,43 @@
     padding:9px 12px;font-size:14px;font-weight:600;cursor:pointer}
   button:active{transform:translateY(1px)}
   button.primary{background:var(--accent);color:#111}
+  button.danger{background:#7f1d1d;color:#fecaca}
   button:disabled{opacity:.4}
-  .legend{position:absolute;z-index:1000;top:10px;left:10px;background:var(--panel);
-    color:var(--ink);border-radius:12px;padding:8px 10px;font-size:12px;line-height:1.7;
-    box-shadow:0 8px 30px rgba(0,0,0,.4)}
-  .sw{display:inline-block;width:11px;height:3px;border-radius:2px;
-    vertical-align:middle;margin-right:6px}
   .stat{font-size:13px;color:var(--muted)}
   .stat b{color:var(--ink)}
   label.toggle{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+  #recenter{position:absolute;z-index:1000;right:10px;bottom:150px;display:none;
+    box-shadow:0 8px 30px rgba(0,0,0,.45)}
 </style>
 </head>
 <body>
 <div id="map"></div>
+
+<div class="search">
+  <div class="inputRow"><span class="dot start"></span>
+    <input id="fromInp" placeholder="Start — type an address or tap the map" autocomplete="off" enterkeyhint="search">
+    <button class="clear" data-clear="A" title="Clear">✕</button>
+  </div>
+  <div class="inputRow"><span class="dot end"></span>
+    <input id="toInp" placeholder="Destination" autocomplete="off" enterkeyhint="search">
+    <button class="clear" data-clear="B" title="Clear">✕</button>
+  </div>
+  <div id="suggest"></div>
+</div>
+
 <div class="legend" id="legend"></div>
+<button id="recenter" class="primary">⌖ Re-center</button>
+
 <div class="panel">
   <div class="row">
-    <button id="loc" class="primary">📍 Route from here</button>
-    <button id="reset">Reset</button>
+    <button id="loc" class="primary">📍 From here</button>
+    <button id="nav" disabled>▶ Navigate</button>
     <button id="gpx" disabled>⬇ GPX</button>
-    <label class="toggle"><input type="checkbox" id="showAll" checked> show all roads</label>
+    <button id="reset">Reset</button>
+    <label class="toggle"><input type="checkbox" id="showAll"> show all roads</label>
   </div>
   <div class="row"><div class="stat" id="stat">Loading network…</div></div>
-  <div class="hint" id="hint">Tap a start, then a destination.</div>
+  <div class="hint" id="hint">Type addresses above, or tap a start then a destination.</div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -51,6 +90,9 @@
 // ---------- config ----------
 const GRAPH_URL = "./graph.json";
 const MIN_MULT = 0.35;               // best discount → keeps A* heuristic admissible
+const BIKE_KMH = 15;                 // for ETA display
+const OFFROUTE_M = 60;               // metres off the line before we re-route
+const ARRIVE_M = 30;
 const CLASS = [
   {name:"Dedicated bike road", color:"#22c55e"},
   {name:"Bike lane",           color:"#3b82f6"},
@@ -65,7 +107,7 @@ let netLayer=null, meMarker=null;
 
 const map = L.map("map",{preferCanvas:true, zoomControl:true}).setView([31.77,35.21],13);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-  {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(map);
+  {maxZoom:19, attribution:"© OpenStreetMap · geocoding © Photon/Nominatim"}).addTo(map);
 
 // legend
 document.getElementById("legend").innerHTML = CLASS.map(c=>
@@ -131,34 +173,138 @@ function drawNetwork(){
   if(routeLine) routeLine.bringToFront();
 }
 
-function setEndpoint(latlng){
+// ---------- endpoints ----------
+const fromInp=document.getElementById("fromInp"), toInp=document.getElementById("toInp");
+function pinLabel(ll){return `Dropped pin (${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)})`;}
+
+function setEndpoint(which, latlng, label){
   const i=nearest(latlng.lat,latlng.lng);
   const p=L.latLng(NODES[i][0],NODES[i][1]);
-  if(origin===null){
-    origin=i; oMarker=L.circleMarker(p,{radius:8,color:"#111",weight:2,fillColor:"#22c55e",fillOpacity:1}).addTo(map);
-    hint("Now tap a destination.");
-  }else if(dest===null){
-    dest=i; dMarker=L.circleMarker(p,{radius:8,color:"#111",weight:2,fillColor:"#ef4444",fillOpacity:1}).addTo(map);
-    route();
-  }else{ resetRoute(); setEndpoint(latlng); }
+  if(which==="A"){
+    origin=i;
+    if(oMarker) oMarker.setLatLng(p);
+    else oMarker=L.circleMarker(p,{radius:8,color:"#111",weight:2,fillColor:"#22c55e",fillOpacity:1}).addTo(map);
+    fromInp.value=label;
+  }else{
+    dest=i;
+    if(dMarker) dMarker.setLatLng(p);
+    else dMarker=L.circleMarker(p,{radius:8,color:"#111",weight:2,fillColor:"#ef4444",fillOpacity:1}).addTo(map);
+    toInp.value=label;
+  }
+  if(origin!==null&&dest!==null) route();
+  else hint(which==="A"?"Now set a destination.":"Now set a start.");
+}
+function clearEndpoint(which){
+  if(which==="A"){origin=null;fromInp.value="";if(oMarker){oMarker.remove();oMarker=null;}}
+  else{dest=null;toInp.value="";if(dMarker){dMarker.remove();dMarker=null;}}
+  clearRouteLine();
+}
+function clearRouteLine(){
+  if(routeLine){routeLine.remove();routeLine=null;}
+  lastRoute=null;
+  document.getElementById("gpx").disabled=true;
+  document.getElementById("nav").disabled=true;
+  stopNav();
 }
 
 function route(){
   const t0=performance.now();
   const r=astar(origin,dest);
-  if(!r){hint("No route found — is your area connected?");return;}
+  if(!r){hint("No route found between these points.");return;}
   lastRoute=r;
   if(routeLine)routeLine.remove();
   routeLine=L.polyline(r.line,{color:"#f59e0b",weight:6,opacity:0.95}).addTo(map);
-  map.fitBounds(routeLine.getBounds(),{padding:[40,40]});
+  if(navWatch===null) map.fitBounds(routeLine.getBounds(),{padding:[60,60]});
   document.getElementById("gpx").disabled=false;
+  document.getElementById("nav").disabled=false;
+  buildCum();
   const ms=(performance.now()-t0).toFixed(0);
+  const eta=Math.max(1,Math.round(r.meters/1000/BIKE_KMH*60));
   document.getElementById("stat").innerHTML =
-    `<b>${(r.meters/1000).toFixed(2)} km</b> · comfort-weighted ${(r.cost/1000).toFixed(2)} · ${ms} ms`;
-  hint("Tap again to start a new route, or export GPX.");
+    `<b>${(r.meters/1000).toFixed(2)} km</b> · ~${eta} min by bike · ${ms} ms`;
+  hint(navWatch!==null?"Re-routed.":"▶ Navigate follows you live; GPX exports for OsmAnd voice nav.");
 }
 
-// ---------- GPX (import into OsmAnd for turn-by-turn) ----------
+// ---------- address search (Photon autocomplete, Nominatim fallback) ----------
+const sugBox=document.getElementById("suggest");
+let sugItems=[], sugFor=null, debounceT=null, searchSeq=0;
+
+async function geocode(q){
+  const c=map.getCenter();
+  try{
+    const r=await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=6&lat=${c.lat}&lon=${c.lng}`);
+    if(!r.ok)throw new Error(r.status);
+    const d=await r.json();
+    const seen=new Set();
+    return d.features.map(f=>{
+      const p=f.properties||{};
+      const main=[p.name,[p.street,p.housenumber].filter(Boolean).join(" ")].filter(Boolean)[0]||q;
+      const sub=[p.city||p.town||p.village||p.district,p.country].filter(Boolean).join(", ");
+      return {label:main,sub,lat:f.geometry.coordinates[1],lng:f.geometry.coordinates[0]};
+    }).filter(s=>{const k=s.label+"|"+s.sub;if(seen.has(k))return false;seen.add(k);return true;});
+  }catch(_){
+    // Photon unreachable -> Nominatim fallback
+    const b=map.getBounds();
+    const r=await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(q)}`+
+      `&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`);
+    if(!r.ok)return [];
+    const d=await r.json();
+    return d.map(x=>({label:x.display_name.split(",")[0],sub:x.display_name.split(",").slice(1,4).join(","),
+      lat:+x.lat,lng:+x.lon}));
+  }
+}
+
+function showSuggestions(items){
+  sugItems=items;
+  if(!items.length){sugBox.style.display="none";sugBox.innerHTML="";return;}
+  sugBox.innerHTML=items.map((s,i)=>
+    `<div class="sug" data-i="${i}">${s.label}<small>${s.sub||""}</small></div>`).join("");
+  sugBox.style.display="block";
+}
+function chooseSuggestion(i){
+  const s=sugItems[i]; if(!s)return;
+  showSuggestions([]);
+  const which=sugFor;
+  setEndpoint(which, L.latLng(s.lat,s.lng), s.sub?`${s.label}, ${s.sub}`:s.label);
+  (which==="A"?fromInp:toInp).blur();
+}
+function attachSearch(inp, which){
+  inp.addEventListener("input",()=>{
+    sugFor=which;
+    if(which==="A"&&origin!==null){origin=null;if(oMarker){oMarker.remove();oMarker=null;}clearRouteLine();}
+    if(which==="B"&&dest!==null){dest=null;if(dMarker){dMarker.remove();dMarker=null;}clearRouteLine();}
+    clearTimeout(debounceT);
+    const q=inp.value.trim();
+    if(q.length<3){showSuggestions([]);return;}
+    debounceT=setTimeout(async()=>{
+      const seq=++searchSeq;
+      const items=await geocode(q).catch(()=>[]);
+      if(seq===searchSeq) showSuggestions(items);
+    },300);
+  });
+  inp.addEventListener("focus",()=>{sugFor=which;});
+  inp.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){e.preventDefault();
+      if(sugItems.length)chooseSuggestion(0);
+      else{clearTimeout(debounceT);geocode(inp.value.trim()).then(items=>{
+        if(items.length){sugItems=items;sugFor=which;chooseSuggestion(0);}
+        else hint("Address not found — try adding the city name.");}).catch(
+        ()=>hint("Address search unavailable — check your connection."));}
+    }
+    if(e.key==="Escape")showSuggestions([]);
+  });
+}
+attachSearch(fromInp,"A"); attachSearch(toInp,"B");
+sugBox.addEventListener("mousedown",e=>{  // mousedown: fires before input blur
+  const el=e.target.closest(".sug"); if(el)chooseSuggestion(+el.dataset.i);
+});
+document.addEventListener("click",e=>{
+  if(!e.target.closest(".search"))showSuggestions([]);
+});
+document.querySelectorAll(".clear").forEach(b=>
+  b.addEventListener("click",()=>clearEndpoint(b.dataset.clear)));
+
+// ---------- GPX (import into OsmAnd for turn-by-turn voice nav) ----------
 function toGPX(line){
   const pts=line.map(([la,lo])=>`<trkpt lat="${la}" lon="${lo}"/>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -166,17 +312,76 @@ function toGPX(line){
 <trk><name>bike route</name><trkseg>${pts}</trkseg></trk></gpx>`;
 }
 
+// ---------- live navigation ----------
+let navWatch=null, navFollow=true, offCount=0, cum=null, cumTotal=0;
+const navBtn=document.getElementById("nav"), recenterBtn=document.getElementById("recenter");
+
+function buildCum(){
+  if(!lastRoute){cum=null;return;}
+  const ln=lastRoute.line; cum=new Float64Array(ln.length); cumTotal=0;
+  for(let i=1;i<ln.length;i++){cumTotal+=hav(ln[i-1][0],ln[i-1][1],ln[i][0],ln[i][1]);cum[i]=cumTotal;}
+}
+function nearestOnRoute(lat,lng){
+  const ln=lastRoute.line; let bi=0,bd=Infinity;const cw=Math.cos(lat*toR);
+  for(let i=0;i<ln.length;i++){const dy=ln[i][0]-lat,dx=(ln[i][1]-lng)*cw;
+    const d=dy*dy+dx*dx; if(d<bd){bd=d;bi=i;}}
+  return {i:bi, meters:hav(lat,lng,ln[bi][0],ln[bi][1])};
+}
+function onFix(pos){
+  const {latitude:la,longitude:lo}=pos.coords, p=L.latLng(la,lo);
+  if(!meMarker)meMarker=L.circleMarker(p,{radius:7,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);
+  else meMarker.setLatLng(p);
+  if(!lastRoute)return;
+  const n=nearestOnRoute(la,lo);
+  if(n.meters>OFFROUTE_M){
+    if(++offCount>=2){offCount=0;hint("Off route — recalculating…");
+      setEndpoint("A",p,"My location");return;}      // re-route from where you are
+  }else offCount=0;
+  const rem=Math.max(0,cumTotal-cum[n.i])+n.meters;
+  if(rem<ARRIVE_M){hint("🎉 You've arrived!");stopNav();return;}
+  const eta=Math.max(1,Math.round(rem/1000/BIKE_KMH*60));
+  document.getElementById("stat").innerHTML=`<b>${(rem/1000).toFixed(2)} km left</b> · ~${eta} min`;
+  if(navFollow)map.setView(p,Math.max(map.getZoom(),16));
+}
+function startNav(){
+  if(!lastRoute||!navigator.geolocation)return;
+  navFollow=true; offCount=0; buildCum();
+  navWatch=navigator.geolocation.watchPosition(onFix,
+    ()=>hint("Couldn't get your location (needs HTTPS + permission)."),
+    {enableHighAccuracy:true,maximumAge:1000,timeout:15000});
+  navBtn.textContent="■ Stop"; navBtn.classList.add("danger");
+  hint("Following you. This plans the line — for voice turn-by-turn, export GPX to OsmAnd.");
+}
+function stopNav(){
+  if(navWatch!==null){navigator.geolocation.clearWatch(navWatch);navWatch=null;}
+  navBtn.textContent="▶ Navigate"; navBtn.classList.remove("danger");
+  recenterBtn.style.display="none"; navFollow=true;
+  if(lastRoute){
+    const eta=Math.max(1,Math.round(lastRoute.meters/1000/BIKE_KMH*60));
+    document.getElementById("stat").innerHTML=
+      `<b>${(lastRoute.meters/1000).toFixed(2)} km</b> · ~${eta} min by bike`;
+  }
+}
+navBtn.onclick=()=>navWatch===null?startNav():stopNav();
+map.on("dragstart",()=>{if(navWatch!==null){navFollow=false;recenterBtn.style.display="block";}});
+recenterBtn.onclick=()=>{navFollow=true;recenterBtn.style.display="none";
+  if(meMarker)map.setView(meMarker.getLatLng(),Math.max(map.getZoom(),16));};
+
 // ---------- ui wiring ----------
 function hint(t){document.getElementById("hint").textContent=t;}
-function resetRoute(){
-  origin=dest=null;
-  [oMarker,dMarker,routeLine].forEach(m=>m&&m.remove());
-  oMarker=dMarker=routeLine=null; lastRoute=null;
-  document.getElementById("gpx").disabled=true;
-  hint("Tap a start, then a destination.");
+function resetAll(){
+  stopNav(); clearEndpoint("A"); clearEndpoint("B");
+  if(meMarker){meMarker.remove();meMarker=null;}
+  hint("Type addresses above, or tap a start then a destination.");
+  if(NODES.length)document.getElementById("stat").innerHTML=
+    `<b>${NODES.length}</b> nodes · <b>${EDGES.length}</b> edges loaded`;
 }
-map.on("click",e=>setEndpoint(e.latlng));
-document.getElementById("reset").onclick=resetRoute;
+map.on("click",e=>{
+  // taps fill the empty slot; when both are set, a tap moves the destination
+  if(origin===null)setEndpoint("A",e.latlng,pinLabel(e.latlng));
+  else setEndpoint("B",e.latlng,pinLabel(e.latlng));
+});
+document.getElementById("reset").onclick=resetAll;
 document.getElementById("showAll").onchange=drawNetwork;
 document.getElementById("gpx").onclick=()=>{
   if(!lastRoute)return;
@@ -187,11 +392,11 @@ document.getElementById("gpx").onclick=()=>{
 document.getElementById("loc").onclick=()=>{
   if(!navigator.geolocation){hint("No geolocation available.");return;}
   navigator.geolocation.getCurrentPosition(pos=>{
-    const {latitude:la,longitude:lo}=pos.coords;
-    if(!meMarker){meMarker=L.circleMarker([la,lo],{radius:6,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);}
-    else meMarker.setLatLng([la,lo]);
-    map.setView([la,lo],15);
-    resetRoute(); setEndpoint(L.latLng(la,lo));
+    const {latitude:la,longitude:lo}=pos.coords, p=L.latLng(la,lo);
+    if(!meMarker){meMarker=L.circleMarker(p,{radius:7,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);}
+    else meMarker.setLatLng(p);
+    if(dest===null)map.setView(p,15);
+    setEndpoint("A",p,"My location");
   },()=>hint("Couldn't get your location (needs HTTPS + permission)."),{enableHighAccuracy:true});
 };
 
@@ -202,8 +407,10 @@ fetch(GRAPH_URL).then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
    ADJ=NODES.map(()=>[]);
    EDGES.forEach((e,i)=>ADJ[e[0]].push([e[1],e[2],i]));
    drawNetwork();
-   if(EDGES.length){ // center on data
-     const b=L.latLngBounds(EDGES[0][4]); for(const e of EDGES)e[4].forEach(c=>b.extend(c));
+   if(EDGES.length){ // center on the bike infrastructure, not the whole padded bbox
+     let b=null;
+     for(const e of EDGES){if(e[3]<=2){if(!b)b=L.latLngBounds(e[4]);e[4].forEach(c=>b.extend(c));}}
+     if(!b){b=L.latLngBounds(EDGES[0][4]);for(const e of EDGES)e[4].forEach(c=>b.extend(c));}
      map.fitBounds(b,{padding:[20,20]});
    }
    document.getElementById("stat").innerHTML=
@@ -212,7 +419,7 @@ fetch(GRAPH_URL).then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
  .catch(err=>{document.getElementById("stat").textContent=
    "Failed to load graph.json ("+err.message+"). Put it next to index.html.";});
 
-// optional offline caching
+// offline caching
 if("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
 </script>
 </body>

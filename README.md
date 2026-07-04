@@ -1,9 +1,16 @@
 # Bike Router
 
-A static, client-side bike-routing PWA. It routes on **my** classified roads —
-preferring dedicated bike roads, then bike lanes, then bike-friendly streets —
-and runs entirely in the browser (in-browser A\*), so it hosts on GitHub Pages
-with no server, no API keys, and installs to an Android home screen.
+A static, client-side bike-routing PWA. It routes A-to-B **anywhere on the
+rideable OSM network**, treating my classified roads as preferences — dedicated
+bike roads first, then bike lanes, then bike-friendly streets; ordinary roads
+are fine and hostile big roads are heavily penalized but never removed. It runs
+entirely in the browser (in-browser A\*), so it hosts on GitHub Pages with no
+server and no API keys, and installs to an Android home screen.
+
+Type start/destination addresses (autocomplete via Photon, Nominatim fallback),
+tap the map, or use GPS. **▶ Navigate** follows you live with remaining
+distance/ETA and re-routes automatically when you leave the line; **GPX**
+exports the route to OsmAnd for voice turn-by-turn.
 
 Source data is `roads.geojson`: 274 OSM-derived ways around Jerusalem
 (194 dedicated bike roads, 75 bike-friendly, 5 bike lanes), each carrying an
@@ -23,30 +30,28 @@ requirements.txt      python deps for the build step only
 Makefile              `make graph`, `make serve`, `make clean`
 ```
 
-## Two phases (important)
+## The routing graph
 
-**The committed `graph.json` is a PREVIEW** built from the bike infrastructure
-only. That means it's fragmented into ~53 disconnected components, so routing
-works *within* a component (e.g. the HaMesila spine) but not across gaps. It's
-enough to load the app and see the network. To get real point-to-point routing,
-regenerate it:
+The committed `graph.json` is the **full rideable OSM network** for the area,
+with my classes welded on by `osm_way_id` as cost preferences. Why the full
+network and not just the bike roads: you sometimes must cross an ordinary road
+to connect two nice segments — big roads stay in the graph but at a heavy cost
+penalty, so they're used only when unavoidable.
+
+It's rebuilt automatically by CI (`.github/workflows/build-graph.yml`) whenever
+`roads.geojson`, `build_graph.py` or `requirements.txt` change — the workflow
+runs `make graph` on a GitHub runner, commits the result, and redeploys Pages.
+You can also trigger it manually from the Actions tab, or build locally:
 
 1. **Build the routable graph** (needs internet — pulls OSM data):
    ```
    pip install -r requirements.txt
    make graph          # == python build_graph.py roads.geojson -o graph.json
    ```
-   This fetches the full *rideable* OSM network for the area via osmnx, welds my
-   classes onto the matching edges by `osm_way_id`, and overwrites `graph.json`.
-   Now A-to-B works anywhere, preferring my roads. Why the full network and not
-   just the bike roads: you sometimes must cross an ordinary road to connect two
-   nice segments — big roads stay in the graph but at a heavy cost penalty, so
-   they're used only when unavoidable.
 
-   > Note for Claude Code: `make graph` reaches out to OSM's Overpass and
-   > Nominatim servers. If this sandbox has no outbound network to those hosts,
-   > the build will fail — that's expected; the committed preview `graph.json`
-   > still lets `make serve` work. Run the build wherever OSM is reachable.
+   > Note for Claude Code: `make graph` reaches out to OSM's Overpass servers.
+   > If the sandbox has no outbound network to those hosts the build fails —
+   > that's expected; use the CI workflow instead.
 
 2. **Run locally** (serve over HTTP — `file://` breaks the service worker):
    ```
@@ -55,9 +60,10 @@ regenerate it:
 
 ## Deploy to GitHub Pages
 
-Push this repo, then Settings -> Pages -> "Deploy from a branch" -> your branch
-/ root. Open the Pages URL in Chrome on Android and "Add to Home Screen".
-Tap a start then a destination to route; the 📍 button routes from GPS.
+Deploys automatically via `.github/workflows/pages.yml` on every push (Pages
+source must be set once to "GitHub Actions" in Settings -> Pages). Open the
+Pages URL in Chrome on Android and "Add to Home Screen". Type addresses or tap
+a start then a destination to route; the 📍 button starts from GPS.
 
 ## Tuning
 
@@ -70,13 +76,16 @@ If you add categories to `roads.geojson`, extend `CATEGORY_MAP` in
 
 ## Navigation
 
-This plans and draws routes; it isn't turn-by-turn. The **GPX** button exports
-the route — import it into OsmAnd on the phone to get spoken navigation of the
-exact line.
+**▶ Navigate** live-follows your GPS along the planned line: remaining
+distance and ETA update as you ride, the map tracks you (drag to look around,
+⌖ to re-center), and drifting >60 m off the line for two fixes re-routes from
+where you are. There's no spoken guidance in-app — for voice turn-by-turn,
+export **GPX** and import it into OsmAnd.
 
 ## How routing works
 
 `graph.json` is `{ nodes: [[lat,lon],...], edges: [[a,b,cost,classCode,[[lat,lon],...]],...] }`.
 Edges are directed (oneways encoded). `cost = length_m * class_multiplier`, so a
 route over a dedicated path is "shorter" in cost-space and A\* prefers it.
-Everything is same-origin except the Leaflet CDN and OSM map tiles.
+Everything is same-origin except the Leaflet CDN, OSM map tiles, and the
+Photon/Nominatim geocoders (all free, no keys).
