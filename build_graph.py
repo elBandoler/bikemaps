@@ -34,6 +34,12 @@ import osmnx as ox
 from shapely.geometry import box
 
 # ---- cost model — these are your aggression knobs -------------------------
+# When True, roads.geojson classes are IGNORED: only OSM data drives the cost
+# model (cycleways preferred, big roads hostile, DANGEROUS_NAMES still apply).
+# roads.geojson is still used for the fetch bbox. Set False to re-enable my
+# classification.
+OSM_CYCLEWAYS_ONLY = True
+
 # Multiplier on segment length (metres). Lower = more attractive to the router.
 CLASS_MULT = {
     "dedicated": 0.35,   # separated bike road / protected path (my classification)
@@ -241,7 +247,11 @@ def main():
           f"{cls.klass.value_counts().to_dict()}")
     G = fetch_network(cls, args.pad)
     print(f"Network: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-    kbk = classify(G, cls, args.buffer)
+    if OSM_CYCLEWAYS_ONLY:
+        print("OSM_CYCLEWAYS_ONLY: ignoring roads.geojson classes")
+        kbk = {}
+    else:
+        kbk = classify(G, cls, args.buffer)
     export, dist = build_export(G, kbk)
 
     Path(args.out).write_text(json.dumps(export, separators=(",", ":")))

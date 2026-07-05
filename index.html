@@ -81,6 +81,14 @@
   #navBar .sub{color:var(--muted);font-size:13px;margin-top:4px}
   #navBar .grow{flex:1;min-width:0}
   #stopNavBtn{background:#3b1d2a;color:#fda4af;border-radius:50%;width:48px;height:48px;font-size:18px;flex:none}
+  #voiceBtn{background:#26334f;color:var(--ink);border-radius:50%;width:48px;height:48px;font-size:18px;flex:none}
+  #voiceBtn.off{opacity:.45}
+
+  /* ---- next-turn banner (navigation) ---- */
+  #turnBanner{position:absolute;z-index:1100;top:12px;left:50%;transform:translateX(-50%);
+    display:none;align-items:center;gap:10px;padding:12px 20px;font-size:22px;font-weight:800;
+    color:var(--ink);white-space:nowrap}
+  #turnBanner .arr{font-size:30px;color:var(--accent);line-height:1}
 
   /* ---- speedometer ---- */
   #speed{position:absolute;z-index:1100;left:12px;bottom:104px;width:76px;height:76px;
@@ -132,11 +140,14 @@
   </div>
 </div>
 
+<div id="turnBanner" class="card"><span class="arr" id="turnArr">⬆</span><span id="turnTxt"></span></div>
+
 <div id="navBar" class="card">
   <div class="grow">
     <div class="big"><span id="navMin">–</span><small>min</small></div>
     <div class="sub" id="navSub"></div>
   </div>
+  <button id="voiceBtn" title="Voice guidance">🔊</button>
   <button id="stopNavBtn" title="Stop">✕</button>
 </div>
 <div id="speed"><b id="speedVal">–</b><small>km/h</small></div>
@@ -243,9 +254,13 @@ function drawNetwork(){
   netLayer=L.layerGroup(feats).addTo(map);
   ALTS.forEach(r=>r._pl&&r._pl.bringToFront());
 }
-$("legend").innerHTML = CLASS.map(c=>
-  `<div><span class="sw" style="background:${c.color}"></span>${c.name}</div>`).join("")+
-  `<label><input type="checkbox" id="allRoadsChk"> show all roads</label>`;
+function buildLegend(){ // only classes that actually exist in the graph
+  const present=new Set(EDGES.map(e=>e[3]));
+  $("legend").innerHTML = CLASS.map((c,i)=>present.has(i)?
+    `<div><span class="sw" style="background:${c.color}"></span>${c.name}</div>`:"").join("")+
+    `<label><input type="checkbox" id="allRoadsChk"> show all roads</label>`;
+  $("allRoadsChk").onchange=e=>{showAllRoads=e.target.checked;drawNetwork();};
+}
 
 let altLayer=[];   // every drawn route line lives here, whatever happens to ALTS
 function clearAltLines(){altLayer.forEach(l=>l.remove());altLayer=[];ALTS.forEach(r=>r._pl=null);}
@@ -307,11 +322,11 @@ function tryRoute(){
     const r=astar(origin,dest,selKey==="short"?"length":"cost");
     if(!r){hint("No route found.",4000);return;}
     clearAltLines();
-    r.key=selKey; ALTS=[r]; lastRoute=r; buildCum(); drawAlts(true);
+    r.key=selKey; ALTS=[r]; lastRoute=r; buildCum(); computeTurns(); drawAlts(true);
     const min=etaMin(r.meters);
     $("navMin").textContent=min;
     $("navSub").textContent=`${(r.meters/1000).toFixed(1)} km · arrive ${fmtClock(min)}`;
-    hint("Re-routed",2500);
+    hint("Re-routed",2500); speak("Route recalculated");
     return;
   }
   clearAltLines();
@@ -496,6 +511,52 @@ function stopTracking(){
 }
 $("locBtn").onclick=()=>trackWatch===null?startTracking():stopTracking();
 
+// ---------- voice guidance (Web Speech API — built into the browser) ----------
+let voiceOn=true, TURNS=[];
+function speak(t){
+  if(!voiceOn||!("speechSynthesis" in window))return;
+  try{const u=new SpeechSynthesisUtterance(t);u.lang="en-US";u.rate=1.05;
+    speechSynthesis.cancel();speechSynthesis.speak(u);}catch(_){}
+}
+$("voiceBtn").onclick=()=>{
+  voiceOn=!voiceOn;
+  $("voiceBtn").textContent=voiceOn?"🔊":"🔇";
+  $("voiceBtn").classList.toggle("off",!voiceOn);
+  if(!voiceOn&&"speechSynthesis" in window)speechSynthesis.cancel();
+  else speak("Voice guidance on");
+};
+function bearing(a,b){
+  const y=Math.sin((b[1]-a[1])*toR)*Math.cos(b[0]*toR);
+  const x=Math.cos(a[0]*toR)*Math.sin(b[0]*toR)-Math.sin(a[0]*toR)*Math.cos(b[0]*toR)*Math.cos((b[1]-a[1])*toR);
+  return Math.atan2(y,x)/toR;
+}
+function computeTurns(){ // turn points from route geometry: bearing change over ~12m windows
+  TURNS=[]; if(!lastRoute||!cum)return;
+  const ln=lastRoute.line, W=12;
+  for(let k=1;k<ln.length-1;k++){
+    let i=k; while(i>0&&cum[k]-cum[i]<W)i--;
+    let j=k; while(j<ln.length-1&&cum[j]-cum[k]<W)j++;
+    const dlt=(bearing(ln[k],ln[j])-bearing(ln[i],ln[k])+540)%360-180;
+    if(Math.abs(dlt)>=35){
+      const last=TURNS[TURNS.length-1];
+      if(last&&cum[k]-last.at<20){if(Math.abs(dlt)>Math.abs(last.d)){last.at=cum[k];last.d=dlt;}}
+      else TURNS.push({at:cum[k],d:dlt,announced:0});
+    }
+  }
+}
+function turnWord(t){return (Math.abs(t.d)>110?"sharp ":"")+(t.d>0?"right":"left");}
+function turnArrow(t){return t.d>0?(Math.abs(t.d)>110?"↳":"↱"):(Math.abs(t.d)>110?"↲":"↰");}
+function guide(cumPos,rem){
+  const t=TURNS.find(t=>t.at>cumPos+8);
+  if(!t){$("turnArr").textContent="⬆";
+    $("turnTxt").textContent=`${(rem/1000).toFixed(1)} km straight to destination`;return;}
+  const dist=Math.max(0,t.at-cumPos), shown=dist>100?Math.round(dist/50)*50:Math.round(dist/10)*10;
+  $("turnArr").textContent=turnArrow(t);
+  $("turnTxt").textContent=`${shown} m`;
+  if(dist<180&&t.announced<1){t.announced=1;speak(`In ${shown} meters, turn ${turnWord(t)}`);}
+  if(dist<30&&t.announced<2){t.announced=2;speak(`Turn ${turnWord(t)} now`);}
+}
+
 // ---------- live navigation ----------
 let navWatch=null, navFollow=true, offCount=0, cum=null, cumTotal=0;
 
@@ -520,30 +581,35 @@ function onFix(pos){
       setEndpoint("A",p,"My location");return;}
   }else offCount=0;
   const rem=Math.max(0,cumTotal-cum[n.i])+n.meters;
-  if(rem<ARRIVE_M){hint("🎉 You've arrived!",6000);backToIdle();return;}
+  if(rem<ARRIVE_M){hint("🎉 You've arrived!",6000);speak("You have arrived");backToIdle();return;}
   const min=Math.max(1,Math.round(rem/1000/BIKE_KMH*60));
   $("navMin").textContent=min;
   $("navSub").textContent=`${(rem/1000).toFixed(1)} km · arrive ${fmtClock(min)}`;
+  guide(cum[n.i],rem);
   if(navFollow)map.setView(p,Math.max(map.getZoom(),17));
 }
 function startNav(){
   if(!lastRoute||!navigator.geolocation){hint("Needs GPS + HTTPS.",4000);return;}
   stopTracking();                        // nav has its own GPS watch
-  navFollow=true; offCount=0; lastFix=null; buildCum();
+  navFollow=true; offCount=0; lastFix=null; buildCum(); computeTurns();
   drawAlts(true);                        // keep only the chosen route on the map
   navWatch=navigator.geolocation.watchPosition(onFix,
     ()=>hint("Waiting for GPS…",4000),
     {enableHighAccuracy:true,maximumAge:1000,timeout:15000});
   show($("sheet"),false); show($("searchCard"),false);
-  show($("navBar"),true); $("speedVal").textContent="–"; setSpeedVisible();
+  show($("navBar"),true); show($("turnBanner"),true);
+  $("speedVal").textContent="–"; setSpeedVisible();
   const min=etaMin(lastRoute.meters);
   $("navMin").textContent=min;
   $("navSub").textContent=`${(lastRoute.meters/1000).toFixed(1)} km · arrive ${fmtClock(min)}`;
-  hint("For voice turn-by-turn, export GPX to OsmAnd.",5000);
+  speak("Starting navigation");
+  guide(0,lastRoute.meters);   // after the start message: an imminent turn overrides it
 }
 function stopNav(){
   if(navWatch!==null){navigator.geolocation.clearWatch(navWatch);navWatch=null;}
-  show($("navBar"),false); setSpeedVisible();
+  show($("navBar"),false); show($("turnBanner"),false);
+  if("speechSynthesis" in window)speechSynthesis.cancel();
+  setSpeedVisible();
   $("recenter").style.display="none"; navFollow=true;
   if(lastRoute){ // back to preview: recompute alternatives so all options return
     if(origin!==null&&dest!==null)tryRoute();
@@ -558,10 +624,7 @@ $("recenter").onclick=()=>{navFollow=true;$("recenter").style.display="none";
 
 // ---------- map taps & layers ----------
 $("layersBtn").onclick=()=>{
-  const vis=$("legend").style.display==="block";
-  $("legend").style.display=vis?"none":"block";
-  if(!vis&&!document.__lgd){document.__lgd=1;
-    $("allRoadsChk").onchange=e=>{showAllRoads=e.target.checked;drawNetwork();};}
+  $("legend").style.display=$("legend").style.display==="block"?"none":"block";
 };
 
 // ---------- load ----------
@@ -571,6 +634,7 @@ fetch(GRAPH_URL).then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
    ADJ=NODES.map(()=>[]);
    LEN=new Float64Array(EDGES.length);
    EDGES.forEach((e,i)=>{ADJ[e[0]].push([e[1],e[2],i]);LEN[i]=e[2]/MULT[e[3]];});
+   buildLegend();
    drawNetwork();
    if(EDGES.length){ // center on the bike infrastructure, not the whole padded bbox
      let b=null;
