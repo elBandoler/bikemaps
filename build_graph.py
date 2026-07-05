@@ -119,7 +119,14 @@ def load_classes(path):
     return gdf
 
 
+# OSM tags bike infrastructure several ways; keep them all on the edges so we
+# can classify (osmnx drops tags not listed here).
+BIKE_TAGS = ["bicycle", "cycleway", "cycleway:right", "cycleway:left",
+             "cycleway:both", "segregated"]
+
+
 def fetch_network(class_gdf, pad_deg):
+    ox.settings.useful_tags_way = list(set(ox.settings.useful_tags_way) | set(BIKE_TAGS))
     minx, miny, maxx, maxy = class_gdf.total_bounds
     poly = box(minx, miny, maxx, maxy).buffer(pad_deg)  # ~pad in degrees
     print(f"Fetching rideable OSM network for bbox padded by {pad_deg}deg ...")
@@ -182,6 +189,27 @@ def is_dangerous(d):
     return name_matches(d, DANGEROUS_NAMES, exact=False)
 
 
+def first(v):
+    return v[0] if isinstance(v, list) else v
+
+
+def bike_infra_class(d, hws):
+    """Classify OSM-mapped bike infrastructure across its tagging variants:
+    standalone cycleways, designated shared paths, and cycleway=* on roads."""
+    if "cycleway" in hws:
+        return "cycleway"
+    if first(d.get("bicycle")) == "designated" and \
+            any(h in ("path", "footway", "pedestrian", "track") for h in hws):
+        return "cycleway"
+    for tag in ("cycleway", "cycleway:right", "cycleway:left", "cycleway:both"):
+        v = first(d.get(tag))
+        if v in ("track", "opposite_track"):
+            return "cycleway"
+        if v in ("lane", "shared_lane", "opposite_lane"):
+            return "lane"
+    return None
+
+
 def build_export(G, klass_by_key):
     node_ids = list(G.nodes)
     idx = {n: i for i, n in enumerate(node_ids)}
@@ -205,11 +233,13 @@ def build_export(G, klass_by_key):
             if klass is not None and name_matches(d, UNCLASSIFY_NAMES, exact=True):
                 klass = None
                 n_unclassified += 1
-            # any OSM cycleway I didn't mark as bike road/lane rides as its own
-            # "unclassified cycleway" class — better than friendly streets
-            if "cycleway" in hws and klass not in ("dedicated", "lane"):
-                klass = "cycleway"
-                n_cycleway += 1
+            # OSM bike infrastructure I didn't mark as bike road/lane rides as
+            # "cycleway" (or "lane" for painted lanes) — better than plain roads
+            if klass not in ("dedicated", "lane"):
+                infra = bike_infra_class(d, hws)
+                if infra is not None:
+                    klass = infra
+                    n_cycleway += 1
         if klass is None:
             klass = "hostile" if any(h in HOSTILE_HIGHWAYS for h in hws) else "other"
         mult = HOSTILE_MULT if klass == "hostile" else CLASS_MULT[klass]
