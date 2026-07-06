@@ -30,7 +30,7 @@
   .inputRow{display:flex;align-items:center;gap:10px;background:var(--field);
     border-radius:12px;padding:2px 12px}
   .inputRow .dot{width:10px;height:10px;border-radius:50%;flex:none}
-  .dot.start{background:#22d3ee}.dot.end{background:#f472b6}
+  .dot.start{background:#22d3ee}.dot.end{background:#f472b6}.dot.via{background:#f59e0b}
   .inputRow input{flex:1;min-width:0;background:transparent;border:0;color:var(--ink);
     font-size:15px;padding:11px 0;outline:none}
   .inputRow input::placeholder{color:var(--muted)}
@@ -40,7 +40,8 @@
   .sug+.sug{border-top:1px solid #1d2b47}
   .sug:hover{background:#1d2b47}
   .sug small{color:var(--muted);display:block}
-  #swapBtn{align-self:flex-end;background:none;color:var(--muted);font-size:13px;padding:4px 8px}
+  #cardBtns{display:flex;justify-content:space-between}
+  #cardBtns button{background:none;color:var(--muted);font-size:13px;padding:4px 8px}
 
   /* ---- floating round buttons ---- */
   .fab{position:absolute;z-index:1000;width:52px;height:52px;border-radius:50%;
@@ -118,12 +119,16 @@
     <input id="fromInp" placeholder="My location" autocomplete="off" enterkeyhint="search">
     <button class="clear" data-clear="A" title="Clear">✕</button>
   </div>
+  <div id="viaRows"></div>
   <div class="inputRow"><span class="dot end"></span>
     <input id="toInp" placeholder="Where to?" autocomplete="off" enterkeyhint="search">
     <button class="clear" data-clear="B" title="Clear">✕</button>
   </div>
   <div id="suggest"></div>
-  <button id="swapBtn">⇅ swap</button>
+  <div id="cardBtns">
+    <button id="addVia">＋ add stop</button>
+    <button id="swapBtn">⇅ swap</button>
+  </div>
 </div>
 
 <button id="layersBtn" class="fab" title="Bike roads">🚲</button>
@@ -187,13 +192,14 @@ const MAX_DETOUR = 1.4;   // drop options longer than this × the shortest route
 // ---------- state ----------
 let NODES=[], EDGES=[], ADJ=[], LEN=null, ELEV=null;
 let origin=null, dest=null, oMarker=null, dMarker=null, lastRoute=null;
+let vias=[], viaSeq=0;           // ordered must-pass stops: {id,node,marker}
 let ALTS=[], selKey="bike";
 let netLayer=null, meMarker=null, showNet=true, showAllRoads=false;
 
 const $=id=>document.getElementById(id);
 const map = L.map("map",{preferCanvas:true, zoomControl:false,
   rotate:true, rotateControl:false, touchRotate:false}).setView([31.77,35.21],13);
-window._map=map;
+window._map=map; window._route=()=>lastRoute;
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   {maxZoom:19, attribution:"© OpenStreetMap · geocoding © Photon/Nominatim"}).addTo(map);
 
@@ -244,6 +250,18 @@ function astar(src,dst,mode="cost",pen=null){
   let meters=0; for(let i=1;i<line.length;i++) meters+=hav(line[i-1][0],line[i-1][1],line[i][0],line[i][1]);
   return {line, meters, seq};
 }
+function routeLegs(points,mode,pen){ // chain A* through every must-pass point
+  let line=[],seq=[],meters=0,viaCum=[];
+  for(let k=0;k<points.length-1;k++){
+    const r=astar(points[k],points[k+1],mode,pen);
+    if(!r)return null;
+    seq=seq.concat(r.seq);
+    line=line.length?line.concat(r.line.slice(1)):r.line;
+    meters+=r.meters;
+    if(k<points.length-2)viaCum.push(meters);
+  }
+  return {line,seq,meters,viaCum};
+}
 const sig=r=>r.seq.length+"/"+r.seq[0]+"/"+r.seq[r.seq.length-1]+"/"+Math.round(r.meters);
 function bikeShare(r){ // fraction of the route on bike infrastructure
   let bike=0,tot=0;
@@ -257,14 +275,14 @@ function climbFall(r){ // metres of climb / descent along the route
     if(dz>0)up+=dz;else down-=dz;}
   return {up:Math.round(up),down:Math.round(down)};
 }
-function computeAlts(src,dst){
+function computeAlts(points){
   const cands=[];
   const push=(r,key)=>{if(r){r.key=key;r.share=bikeShare(r);r.ele=climbFall(r);cands.push(r);}};
-  const rm=astar(src,dst,"maxbike");           push(rm,"maxbike");
-  const rb=astar(src,dst,"cost");              push(rb,"bike");
-  const rs=astar(src,dst,"length");            push(rs,"short");
-  if(rm)push(astar(src,dst,"maxbike",new Set(rm.seq)),"alt");
-  if(rb)push(astar(src,dst,"cost",new Set(rb.seq)),"alt2");
+  const rm=routeLegs(points,"maxbike");        push(rm,"maxbike");
+  const rb=routeLegs(points,"cost");           push(rb,"bike");
+  const rs=routeLegs(points,"length");         push(rs,"short");
+  if(rm)push(routeLegs(points,"maxbike",new Set(rm.seq)),"alt");
+  if(rb)push(routeLegs(points,"cost",new Set(rb.seq)),"alt2");
   const seen=new Set(),out=[];
   for(const r of cands){
     if(rs&&r.meters>rs.meters*MAX_DETOUR)continue;  // no extreme detours
@@ -331,6 +349,12 @@ function setEndpoint(which, latlng, label){
     if(oMarker) oMarker.setLatLng(p);
     else oMarker=L.circleMarker(p,{radius:8,color:"#062331",weight:2,fillColor:"#22d3ee",fillOpacity:1}).addTo(map);
     fromInp.value=label;
+  }else if(which[0]==="V"){
+    const v=vias.find(v=>"V"+v.id===which); if(!v)return;
+    v.node=i;
+    if(v.marker) v.marker.setLatLng(p);
+    else v.marker=L.circleMarker(p,{radius:7,color:"#331b06",weight:2,fillColor:"#f59e0b",fillOpacity:1}).addTo(map);
+    $("viaInp-"+v.id).value=label;
   }else{
     dest=i;
     if(dMarker) dMarker.setLatLng(p);
@@ -338,6 +362,12 @@ function setEndpoint(which, latlng, label){
     toInp.value=label;
   }
   tryRoute();
+}
+function routePoints(){ // origin -> set stops in order -> destination
+  const pts=[origin];
+  for(const v of vias)if(v.node!==null)pts.push(v.node);
+  pts.push(dest);
+  return pts;
 }
 function tryRoute(){
   if(dest===null){hint("Where to? Pick a destination.",4000);return;}
@@ -352,9 +382,10 @@ function tryRoute(){
       {enableHighAccuracy:true,timeout:8000});
     return;
   }
-  if(navWatch!==null){ // re-route while navigating: single route in the chosen style
+  if(navWatch!==null){ // re-route while navigating: through the stops not yet passed
     const mode=selKey==="short"?"length":(selKey==="maxbike"||selKey==="alt")?"maxbike":"cost";
-    const r=astar(origin,dest,mode);
+    navVias=navVias.slice(nextViaIdx); nextViaIdx=0;
+    const r=routeLegs([origin,...navVias,dest],mode);
     if(!r){hint("No route found.",4000);return;}
     clearAltLines();
     r.key=selKey; ALTS=[r]; lastRoute=r; buildCum(); computeTurns(); drawAlts(true);
@@ -365,7 +396,7 @@ function tryRoute(){
     return;
   }
   clearAltLines();
-  ALTS=computeAlts(origin,dest);
+  ALTS=computeAlts(routePoints());
   if(!ALTS.length){hint("No route found between these points.",5000);return;}
   selKey=ALTS[0].key;   // options are sorted most-cycleways-first; default to the top one
   lastRoute=ALTS.find(r=>r.key===selKey); buildCum();
@@ -402,7 +433,7 @@ function clearRoute(){
 }
 function backToIdle(){
   stopNav(); clearRoute();
-  clearEndpoint("A"); clearEndpoint("B");
+  clearEndpoint("A"); clearEndpoint("B"); clearVias();
   show($("searchCard"),false); show($("searchPill"),true); hint("");
 }
 const ARROW_ICON=L.divIcon({className:"navArrow",iconSize:[30,30],iconAnchor:[15,15],
@@ -418,6 +449,37 @@ function updateMe(p){
       :L.circleMarker(p,{radius:7,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);
   }else meMarker.setLatLng(p);
 }
+// ---------- must-pass stops ----------
+function addViaRow(){
+  if(vias.length>=3)return;
+  const id=++viaSeq;
+  vias.push({id,node:null,marker:null});
+  const row=document.createElement("div");
+  row.className="inputRow"; row.id="viaRow-"+id;
+  row.innerHTML=`<span class="dot via"></span>`+
+    `<input id="viaInp-${id}" placeholder="Stop — a road to pass through" autocomplete="off" enterkeyhint="search">`+
+    `<button class="clear" title="Remove stop">✕</button>`;
+  $("viaRows").appendChild(row);
+  attachSearch(row.querySelector("input"),"V"+id);
+  row.querySelector(".clear").onclick=()=>removeVia(id);
+  if(vias.length>=3)$("addVia").style.display="none";
+  row.querySelector("input").focus();
+}
+function removeVia(id){
+  const i=vias.findIndex(v=>v.id===id); if(i<0)return;
+  if(vias[i].marker)vias[i].marker.remove();
+  vias.splice(i,1);
+  const row=$("viaRow-"+id); if(row)row.remove();
+  $("addVia").style.display="";
+  clearRoute();
+  if(origin!==null&&dest!==null)tryRoute();
+}
+function clearVias(){
+  vias.slice().forEach(v=>{if(v.marker)v.marker.remove();const r=$("viaRow-"+v.id);if(r)r.remove();});
+  vias=[]; $("addVia").style.display="";
+}
+$("addVia").onclick=addViaRow;
+
 $("swapBtn").onclick=()=>{
   const o=origin,d=dest,ov=fromInp.value,dv=toInp.value;
   if(o===null&&d===null)return;
@@ -476,13 +538,15 @@ function chooseSuggestion(i){
   showSuggestions([]);
   const which=sugFor;
   setEndpoint(which, L.latLng(s.lat,s.lng), s.sub?`${s.label}, ${s.sub}`:s.label);
-  (which==="A"?fromInp:toInp).blur();
+  (which==="A"?fromInp:which==="B"?toInp:$("viaInp-"+which.slice(1))).blur();
 }
 function attachSearch(inp, which){
   inp.addEventListener("input",()=>{
     sugFor=which;
     if(which==="A"&&origin!==null){origin=null;if(oMarker){oMarker.remove();oMarker=null;}clearRoute();show($("searchCard"),true,"flex");}
     if(which==="B"&&dest!==null){dest=null;if(dMarker){dMarker.remove();dMarker=null;}clearRoute();show($("searchCard"),true,"flex");}
+    if(which[0]==="V"){const v=vias.find(v=>"V"+v.id===which);
+      if(v&&v.node!==null){v.node=null;if(v.marker){v.marker.remove();v.marker=null;}clearRoute();show($("searchCard"),true,"flex");}}
     clearTimeout(debounceT);
     const q=inp.value.trim();
     if(q.length<3){showSuggestions([]);return;}
@@ -605,6 +669,7 @@ function guide(cumPos,rem){
 // ---------- live navigation ----------
 let navWatch=null, navFollow=true, offCount=0, cum=null, cumTotal=0;
 let navT0=null, navTimerInt=null;
+let navVias=[], nextViaIdx=0;    // stops still ahead during this ride
 const NAV_ZOOM=17;
 let curBearing=null;
 function destPoint(lat,lng,brg,distM){ // point distM metres from lat/lng at bearing brg
@@ -660,6 +725,10 @@ function onFix(pos){
       setEndpoint("A",p,"My location");return;}
   }else offCount=0;
   const rem=Math.max(0,cumTotal-cum[n.i])+n.meters;
+  if(lastRoute.viaCum&&nextViaIdx<lastRoute.viaCum.length&&
+     cum[n.i]>lastRoute.viaCum[nextViaIdx]-30){
+    nextViaIdx++; hint("Stop reached ✔",4000); speak("Waypoint reached");
+  }
   if(rem<ARRIVE_M){hint("🎉 You've arrived!",6000);speak("You have arrived");backToIdle();return;}
   const min=Math.max(1,Math.round(rem/1000/BIKE_KMH*60));
   $("navMin").textContent=min;
@@ -670,7 +739,9 @@ function onFix(pos){
 function startNav(){
   if(!lastRoute||!navigator.geolocation){hint("Needs GPS + HTTPS.",4000);return;}
   stopTracking();                        // nav has its own GPS watch
-  navFollow=true; offCount=0; lastFix=null; curBearing=null; buildCum(); computeTurns();
+  navFollow=true; offCount=0; lastFix=null; curBearing=null;
+  navVias=routePoints().slice(1,-1); nextViaIdx=0;
+  buildCum(); computeTurns();
   if(meMarker){meMarker.remove();meMarker=null;}   // swap the dot for the arrow
   drawAlts(true);                        // keep only the chosen route on the map
   navWatch=navigator.geolocation.watchPosition(onFix,
