@@ -171,7 +171,12 @@ const CLASS = [
   {name:"Hostile (big road)",  color:"#ef4444"},
   {name:"Cycleway (unclassified)", color:"#2dd4bf", bike:true},
 ];
-const LABEL={bike:"Bike priority", short:"Shortest", alt:"Alternative"};
+const LABEL={maxbike:"Max cycleways", bike:"Balanced", short:"Shortest",
+             alt:"Alt (max 🚲)", alt2:"Alt (balanced)"};
+// "max cycleways" weights by class code — cycleways nearly free so the router
+// detours hard to stay on them; must mirror CODE order like MULT does
+const MAXB = [0.15, 0.30, 0.80, 1.0, 4.0, 0.15];
+const MAXB_MIN = 0.15;
 // ---------- state ----------
 let NODES=[], EDGES=[], ADJ=[], LEN=null;
 let origin=null, dest=null, oMarker=null, dMarker=null, lastRoute=null;
@@ -203,9 +208,10 @@ function nearest(lat,lng){
   return best;
 }
 
-// ---------- A* (mode: 'cost' = comfort-weighted, 'length' = pure distance) ----------
+// ---------- A* ('cost' = comfort-weighted, 'length' = distance, 'maxbike' = hug cycleways) ----------
 function astar(src,dst,mode="cost",pen=null){
-  const n=NODES.length, hm=(mode==="length")?1:MIN_MULT;
+  const n=NODES.length,
+        hm=(mode==="length")?1:(mode==="maxbike")?MAXB_MIN:MIN_MULT;
   const H=(u)=>hav(NODES[u][0],NODES[u][1],NODES[dst][0],NODES[dst][1])*hm;
   const g=new Float64Array(n).fill(Infinity);
   const came=new Int32Array(n).fill(-1);
@@ -216,7 +222,8 @@ function astar(src,dst,mode="cost",pen=null){
     const [,u]=open.pop(); if(closed[u])continue; closed[u]=1; if(u===dst)break;
     const nb=ADJ[u]; for(let j=0;j<nb.length;j++){
       const v=nb[j][0],ei=nb[j][2]; if(closed[v])continue;
-      let w=(mode==="length")?LEN[ei]:nb[j][1];
+      let w=(mode==="length")?LEN[ei]:
+            (mode==="maxbike")?LEN[ei]*MAXB[EDGES[ei][3]]:nb[j][1];
       if(pen&&pen.has(ei))w*=ALT_PENALTY;
       const ng=g[u]+w;
       if(ng<g[v]){g[v]=ng;came[v]=u;cameEdge[v]=ei;open.push(ng+H(v),v);}
@@ -229,15 +236,23 @@ function astar(src,dst,mode="cost",pen=null){
   return {line, meters, seq};
 }
 const sig=r=>r.seq.length+"/"+r.seq[0]+"/"+r.seq[r.seq.length-1]+"/"+Math.round(r.meters);
+function bikeShare(r){ // fraction of the route on bike infrastructure
+  let bike=0,tot=0;
+  for(const ei of r.seq){const l=LEN[ei];tot+=l;if(CLASS[EDGES[ei][3]].bike)bike+=l;}
+  return tot?bike/tot:0;
+}
 function computeAlts(src,dst){
-  const out=[];
-  const r1=astar(src,dst,"cost"); if(!r1)return out;
-  r1.key="bike"; out.push(r1);
-  const r2=astar(src,dst,"length");
-  if(r2&&sig(r2)!==sig(r1)){r2.key="short";out.push(r2);}
-  const r3=astar(src,dst,"cost",new Set(r1.seq));
-  if(r3&&sig(r3)!==sig(r1)&&(!r2||sig(r3)!==sig(r2))){r3.key="alt";out.push(r3);}
-  return out;
+  const cands=[];
+  const push=(r,key)=>{if(r){r.key=key;r.share=bikeShare(r);cands.push(r);}};
+  const rm=astar(src,dst,"maxbike");           push(rm,"maxbike");
+  const rb=astar(src,dst,"cost");              push(rb,"bike");
+  push(astar(src,dst,"length"),"short");
+  if(rm)push(astar(src,dst,"maxbike",new Set(rm.seq)),"alt");
+  if(rb)push(astar(src,dst,"cost",new Set(rb.seq)),"alt2");
+  const seen=new Set(),out=[];
+  for(const r of cands){const s=sig(r);if(!seen.has(s)){seen.add(s);out.push(r);}}
+  out.sort((a,b)=>b.share-a.share||a.meters-b.meters);  // most cycleways first
+  return out.slice(0,5);
 }
 
 // ---------- rendering ----------
@@ -319,7 +334,8 @@ function tryRoute(){
     return;
   }
   if(navWatch!==null){ // re-route while navigating: single route in the chosen style
-    const r=astar(origin,dest,selKey==="short"?"length":"cost");
+    const mode=selKey==="short"?"length":(selKey==="maxbike"||selKey==="alt")?"maxbike":"cost";
+    const r=astar(origin,dest,mode);
     if(!r){hint("No route found.",4000);return;}
     clearAltLines();
     r.key=selKey; ALTS=[r]; lastRoute=r; buildCum(); computeTurns(); drawAlts(true);
@@ -332,8 +348,7 @@ function tryRoute(){
   clearAltLines();
   ALTS=computeAlts(origin,dest);
   if(!ALTS.length){hint("No route found between these points.",5000);return;}
-  selKey="bike";   // every new query starts from the bike-priority route
-  if(!ALTS.some(r=>r.key===selKey))selKey=ALTS[0].key;
+  selKey=ALTS[0].key;   // options are sorted most-cycleways-first; default to the top one
   lastRoute=ALTS.find(r=>r.key===selKey); buildCum();
   drawAlts(false); updateSheet(); showSuggestions([]);
   let b=null; ALTS.forEach(r=>{if(!b)b=L.latLngBounds(r.line);r.line.forEach(c=>b.extend(c));});
@@ -343,12 +358,13 @@ function tryRoute(){
 function updateSheet(){
   $("altChips").innerHTML=ALTS.map(r=>
     `<div class="chip ${r.key===selKey?"sel":""}" data-k="${r.key}">${LABEL[r.key]}` +
-    `<b>${etaMin(r.meters)} min</b>${(r.meters/1000).toFixed(1)} km</div>`).join("");
+    `<b>${etaMin(r.meters)} min</b>${(r.meters/1000).toFixed(1)} km · ${Math.round(r.share*100)}% 🚲</div>`).join("");
   document.querySelectorAll("#altChips .chip").forEach(c=>
     c.addEventListener("click",()=>selectAlt(c.dataset.k)));
   const r=lastRoute, min=etaMin(r.meters);
   $("etaMin").textContent=min;
-  $("routeSub").textContent=`${(r.meters/1000).toFixed(1)} km · arrive ${fmtClock(min)} · ${LABEL[selKey].toLowerCase()}`;
+  $("routeSub").textContent=`${(r.meters/1000).toFixed(1)} km · arrive ${fmtClock(min)} · `+
+    `${Math.round(r.share*100)}% on cycleways`;
 }
 function selectAlt(k){
   if(!ALTS.some(r=>r.key===k))return;
