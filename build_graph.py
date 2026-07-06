@@ -262,43 +262,48 @@ def build_export(G, klass_by_key):
 
 
 def fetch_elevations(nodes):
-    """Node elevations (m), batched and throttled. Tries Open-Meteo, falls
-    back to OpenTopoData (SRTM) per batch — both free, no keys."""
+    """Node elevations (m), batched and throttled. Two free keyless providers;
+    whichever answers gets promoted so a dead one is only paid for once."""
     import time
     import requests
+
+    def opentopodata(chunk):
+        r = requests.get(
+            "https://api.opentopodata.org/v1/srtm30m",
+            params={"locations": "|".join(f"{p[0]:.6f},{p[1]:.6f}" for p in chunk)},
+            timeout=20)
+        r.raise_for_status()
+        return [x["elevation"] for x in r.json()["results"]]
 
     def open_meteo(chunk):
         r = requests.get(
             "https://api.open-meteo.com/v1/elevation",
             params={"latitude": ",".join(f"{p[0]:.6f}" for p in chunk),
                     "longitude": ",".join(f"{p[1]:.6f}" for p in chunk)},
-            timeout=60)
+            timeout=20)
         r.raise_for_status()
         return r.json()["elevation"]
 
-    def opentopodata(chunk):
-        r = requests.get(
-            "https://api.opentopodata.org/v1/srtm30m",
-            params={"locations": "|".join(f"{p[0]:.6f},{p[1]:.6f}" for p in chunk)},
-            timeout=60)
-        r.raise_for_status()
-        return [x["elevation"] for x in r.json()["results"]]
-
+    providers = [opentopodata, open_meteo]
     out = []
     for i in range(0, len(nodes), 100):
         chunk = nodes[i:i + 100]
         got = None
-        for attempt, fetch in enumerate((open_meteo, open_meteo,
-                                         opentopodata, opentopodata)):
-            try:
-                got = fetch(chunk)
+        for pi, fetch in enumerate(list(providers)):
+            for attempt in range(2):
+                try:
+                    got = fetch(chunk)
+                    break
+                except Exception:       # timeout / 429 / 5xx — brief backoff
+                    time.sleep(3 * (attempt + 1))
+            if got is not None:
+                if pi:                  # fallback worked: make it primary
+                    providers.reverse()
                 break
-            except Exception:          # timeout / 429 / 5xx — back off, retry
-                time.sleep(5 * (attempt + 1))
         if got is None:
             raise RuntimeError(f"all elevation providers failed at node {i}")
         out.extend(got)
-        time.sleep(1.2)                 # both APIs rate-limit burst traffic
+        time.sleep(1.1)                 # both APIs rate-limit burst traffic
     return [round(e) if e is not None else 0 for e in out]
 
 
