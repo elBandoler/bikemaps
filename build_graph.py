@@ -262,27 +262,43 @@ def build_export(G, klass_by_key):
 
 
 def fetch_elevations(nodes):
-    """Node elevations (m) from Open-Meteo's free elevation API, batched and
-    throttled (the API 429s on burst traffic)."""
+    """Node elevations (m), batched and throttled. Tries Open-Meteo, falls
+    back to OpenTopoData (SRTM) per batch — both free, no keys."""
     import time
     import requests
+
+    def open_meteo(chunk):
+        r = requests.get(
+            "https://api.open-meteo.com/v1/elevation",
+            params={"latitude": ",".join(f"{p[0]:.6f}" for p in chunk),
+                    "longitude": ",".join(f"{p[1]:.6f}" for p in chunk)},
+            timeout=60)
+        r.raise_for_status()
+        return r.json()["elevation"]
+
+    def opentopodata(chunk):
+        r = requests.get(
+            "https://api.opentopodata.org/v1/srtm30m",
+            params={"locations": "|".join(f"{p[0]:.6f},{p[1]:.6f}" for p in chunk)},
+            timeout=60)
+        r.raise_for_status()
+        return [x["elevation"] for x in r.json()["results"]]
+
     out = []
     for i in range(0, len(nodes), 100):
         chunk = nodes[i:i + 100]
-        params = {"latitude": ",".join(f"{p[0]:.6f}" for p in chunk),
-                  "longitude": ",".join(f"{p[1]:.6f}" for p in chunk)}
-        for attempt in range(4):
-            r = requests.get("https://api.open-meteo.com/v1/elevation",
-                             params=params, timeout=30)
-            if r.status_code == 429:          # rate limited: back off and retry
-                time.sleep(10 * (attempt + 1))
-                continue
-            r.raise_for_status()
-            out.extend(r.json()["elevation"])
-            break
-        else:
-            raise RuntimeError("Open-Meteo kept rate-limiting after retries")
-        time.sleep(1.0)
+        got = None
+        for attempt, fetch in enumerate((open_meteo, open_meteo,
+                                         opentopodata, opentopodata)):
+            try:
+                got = fetch(chunk)
+                break
+            except Exception:          # timeout / 429 / 5xx — back off, retry
+                time.sleep(5 * (attempt + 1))
+        if got is None:
+            raise RuntimeError(f"all elevation providers failed at node {i}")
+        out.extend(got)
+        time.sleep(1.2)                 # both APIs rate-limit burst traffic
     return [round(e) if e is not None else 0 for e in out]
 
 
