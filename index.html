@@ -159,6 +159,7 @@
 <div id="hint"><span id="hintTxt">Loading network…</span></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.js"></script>
 <script>
 // ---------- config ----------
 const GRAPH_URL = "./graph.json";
@@ -190,7 +191,9 @@ let ALTS=[], selKey="bike";
 let netLayer=null, meMarker=null, showNet=true, showAllRoads=false;
 
 const $=id=>document.getElementById(id);
-const map = L.map("map",{preferCanvas:true, zoomControl:false}).setView([31.77,35.21],13);
+const map = L.map("map",{preferCanvas:true, zoomControl:false,
+  rotate:true, rotateControl:false, touchRotate:false}).setView([31.77,35.21],13);
+window._map=map;
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   {maxZoom:19, attribution:"© OpenStreetMap · geocoding © Photon/Nominatim"}).addTo(map);
 
@@ -402,9 +405,18 @@ function backToIdle(){
   clearEndpoint("A"); clearEndpoint("B");
   show($("searchCard"),false); show($("searchPill"),true); hint("");
 }
+const ARROW_ICON=L.divIcon({className:"navArrow",iconSize:[30,30],iconAnchor:[15,15],
+  html:'<svg viewBox="0 0 30 30" width="30" height="30"><path d="M15 3 L26 26 L15 20 L4 26 Z" '+
+       'fill="#22d3ee" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>'});
 function updateMe(p){
-  if(!meMarker)meMarker=L.circleMarker(p,{radius:7,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);
-  else meMarker.setLatLng(p);
+  // during navigation the map is course-up, so a screen-up arrow = travel direction
+  const wantArrow=navWatch!==null;
+  const isArrow=meMarker&&meMarker.options&&meMarker.options.icon===ARROW_ICON;
+  if(meMarker&&wantArrow!==isArrow){meMarker.remove();meMarker=null;}
+  if(!meMarker){
+    meMarker=wantArrow?L.marker(p,{icon:ARROW_ICON,interactive:false}).addTo(map)
+      :L.circleMarker(p,{radius:7,color:"#fff",weight:2,fillColor:"#0ea5e9",fillOpacity:1}).addTo(map);
+  }else meMarker.setLatLng(p);
 }
 $("swapBtn").onclick=()=>{
   const o=origin,d=dest,ov=fromInp.value,dv=toInp.value;
@@ -593,6 +605,34 @@ function guide(cumPos,rem){
 // ---------- live navigation ----------
 let navWatch=null, navFollow=true, offCount=0, cum=null, cumTotal=0;
 let navT0=null, navTimerInt=null;
+const NAV_ZOOM=17;
+let curBearing=null;
+function destPoint(lat,lng,brg,distM){ // point distM metres from lat/lng at bearing brg
+  const b=brg*toR,dR=distM/RE,la1=lat*toR,lo1=lng*toR;
+  const la2=Math.asin(Math.sin(la1)*Math.cos(dR)+Math.cos(la1)*Math.sin(dR)*Math.cos(b));
+  const lo2=lo1+Math.atan2(Math.sin(b)*Math.sin(dR)*Math.cos(la1),
+                           Math.cos(dR)-Math.sin(la1)*Math.sin(la2));
+  return L.latLng(la2/toR,lo2/toR);
+}
+function headingFor(pos,n){ // GPS course if moving, else the route's direction here
+  const h=pos.coords.heading;
+  if(h!=null&&!Number.isNaN(h)&&(pos.coords.speed||0)>0.8)return h;
+  if(lastRoute&&n){
+    const ln=lastRoute.line;
+    let j=n.i;while(j<ln.length-1&&cum[j]-cum[n.i]<15)j++;
+    if(j>n.i)return bearing(ln[n.i],ln[j]);
+  }
+  return curBearing;
+}
+function navCamera(lat,lng,hd){ // Waze-style: course-up, rider low on screen
+  if(hd==null)return;
+  if(curBearing==null)curBearing=hd;
+  else{const d=((hd-curBearing+540)%360)-180;if(Math.abs(d)>3)curBearing=(curBearing+d*0.5+360)%360;}
+  map.setBearing(-curBearing);
+  const mpp=156543.03392*Math.cos(lat*toR)/2**NAV_ZOOM;      // metres per pixel
+  const ahead=destPoint(lat,lng,curBearing,map.getSize().y*0.22*mpp);
+  map.setView(ahead,NAV_ZOOM,{animate:false});
+}
 function fmtDur(ms){
   const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
   return h?`${h}:${String(m%60).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`
@@ -625,12 +665,13 @@ function onFix(pos){
   $("navMin").textContent=min;
   $("navSub").textContent=`${(rem/1000).toFixed(1)} km · arrive ${fmtClock(min)}`;
   guide(cum[n.i],rem);
-  if(navFollow)map.setView(p,Math.max(map.getZoom(),17));
+  if(navFollow)navCamera(la,lo,headingFor(pos,n));
 }
 function startNav(){
   if(!lastRoute||!navigator.geolocation){hint("Needs GPS + HTTPS.",4000);return;}
   stopTracking();                        // nav has its own GPS watch
-  navFollow=true; offCount=0; lastFix=null; buildCum(); computeTurns();
+  navFollow=true; offCount=0; lastFix=null; curBearing=null; buildCum(); computeTurns();
+  if(meMarker){meMarker.remove();meMarker=null;}   // swap the dot for the arrow
   drawAlts(true);                        // keep only the chosen route on the map
   navWatch=navigator.geolocation.watchPosition(onFix,
     ()=>hint("Waiting for GPS…",4000),
@@ -649,6 +690,8 @@ function startNav(){
 }
 function stopNav(){
   if(navWatch!==null){navigator.geolocation.clearWatch(navWatch);navWatch=null;}
+  map.setBearing(0); curBearing=null;              // back to north-up
+  if(meMarker){const p=meMarker.getLatLng();meMarker.remove();meMarker=null;updateMe(p);}
   show($("navBar"),false); show($("turnBanner"),false);
   document.body.classList.remove("nav");
   if(navTimerInt!==null){clearInterval(navTimerInt);navTimerInt=null;}
@@ -668,7 +711,9 @@ $("stopNavBtn").onclick=stopNav;
 $("closeRoute").onclick=backToIdle;
 map.on("dragstart",()=>{if(navWatch!==null){navFollow=false;$("recenter").style.display="flex";}});
 $("recenter").onclick=()=>{navFollow=true;$("recenter").style.display="none";
-  if(meMarker)map.setView(meMarker.getLatLng(),Math.max(map.getZoom(),17));};
+  if(meMarker){const p=meMarker.getLatLng();
+    if(navWatch!==null)navCamera(p.lat,p.lng,curBearing);
+    else map.setView(p,Math.max(map.getZoom(),17));}};
 
 // ---------- map taps & layers ----------
 $("layersBtn").onclick=()=>{
