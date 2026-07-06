@@ -80,7 +80,8 @@
   #navBar .big small{font-size:14px;font-weight:600;color:var(--muted);margin-left:4px}
   #navBar .sub{color:var(--muted);font-size:13px;margin-top:4px}
   #navBar .grow{flex:1;min-width:0}
-  #stopNavBtn{background:#3b1d2a;color:#fda4af;border-radius:50%;width:48px;height:48px;font-size:18px;flex:none}
+  #stopNavBtn{background:#7f1d1d;color:#fecaca;border-radius:14px;height:48px;
+    padding:0 16px;font-size:15px;letter-spacing:1px;flex:none}
   #voiceBtn{background:#26334f;color:var(--ink);border-radius:50%;width:48px;height:48px;font-size:18px;flex:none}
   #voiceBtn.off{opacity:.45}
 
@@ -90,13 +91,16 @@
     color:var(--ink);white-space:nowrap}
   #turnBanner .arr{font-size:30px;color:var(--accent);line-height:1}
 
-  /* ---- speedometer ---- */
+  /* ---- speedometer (grows while navigating) ---- */
   #speed{position:absolute;z-index:1100;left:12px;bottom:104px;width:76px;height:76px;
     border-radius:50%;background:#fff;color:#0b1220;display:none;flex-direction:column;
     align-items:center;justify-content:center;box-shadow:0 8px 30px rgba(0,0,0,.5);
     border:4px solid #cbd5e1}
   #speed b{font-size:24px;line-height:1}
   #speed small{font-size:10px;color:#64748b;margin-top:2px}
+  body.nav #speed{width:116px;height:116px;bottom:112px;border:6px solid var(--accent)}
+  body.nav #speed b{font-size:42px}
+  body.nav #speed small{font-size:12px}
 
   #hint{position:absolute;z-index:1050;left:12px;right:12px;bottom:104px;max-width:440px;margin:0 auto;
     text-align:center;pointer-events:none}
@@ -146,9 +150,10 @@
   <div class="grow">
     <div class="big"><span id="navMin">–</span><small>min</small></div>
     <div class="sub" id="navSub"></div>
+    <div class="sub" id="navTimer">⏱ 0:00</div>
   </div>
   <button id="voiceBtn" title="Voice guidance">🔊</button>
-  <button id="stopNavBtn" title="Stop">✕</button>
+  <button id="stopNavBtn" title="End navigation">END</button>
 </div>
 <div id="speed"><b id="speedVal">–</b><small>km/h</small></div>
 <div id="hint"><span id="hintTxt">Loading network…</span></div>
@@ -173,12 +178,13 @@ const CLASS = [
 ];
 const LABEL={maxbike:"Max cycleways", bike:"Balanced", short:"Shortest",
              alt:"Alt (max 🚲)", alt2:"Alt (balanced)"};
-// "max cycleways" weights by class code — cycleways nearly free so the router
-// detours hard to stay on them; must mirror CODE order like MULT does
-const MAXB = [0.15, 0.30, 0.80, 1.0, 4.0, 0.15];
-const MAXB_MIN = 0.15;
+// "max cycleways" weights by class code — pulls onto cycleway segments along
+// the way without committing to huge detours; must mirror CODE order like MULT
+const MAXB = [0.35, 0.50, 0.80, 1.0, 4.0, 0.35];
+const MAXB_MIN = 0.35;
+const MAX_DETOUR = 1.4;   // drop options longer than this × the shortest route
 // ---------- state ----------
-let NODES=[], EDGES=[], ADJ=[], LEN=null;
+let NODES=[], EDGES=[], ADJ=[], LEN=null, ELEV=null;
 let origin=null, dest=null, oMarker=null, dMarker=null, lastRoute=null;
 let ALTS=[], selKey="bike";
 let netLayer=null, meMarker=null, showNet=true, showAllRoads=false;
@@ -241,16 +247,26 @@ function bikeShare(r){ // fraction of the route on bike infrastructure
   for(const ei of r.seq){const l=LEN[ei];tot+=l;if(CLASS[EDGES[ei][3]].bike)bike+=l;}
   return tot?bike/tot:0;
 }
+function climbFall(r){ // metres of climb / descent along the route
+  if(!ELEV)return null;
+  let up=0,down=0;
+  for(const ei of r.seq){const e=EDGES[ei],dz=ELEV[e[1]]-ELEV[e[0]];
+    if(dz>0)up+=dz;else down-=dz;}
+  return {up:Math.round(up),down:Math.round(down)};
+}
 function computeAlts(src,dst){
   const cands=[];
-  const push=(r,key)=>{if(r){r.key=key;r.share=bikeShare(r);cands.push(r);}};
+  const push=(r,key)=>{if(r){r.key=key;r.share=bikeShare(r);r.ele=climbFall(r);cands.push(r);}};
   const rm=astar(src,dst,"maxbike");           push(rm,"maxbike");
   const rb=astar(src,dst,"cost");              push(rb,"bike");
-  push(astar(src,dst,"length"),"short");
+  const rs=astar(src,dst,"length");            push(rs,"short");
   if(rm)push(astar(src,dst,"maxbike",new Set(rm.seq)),"alt");
   if(rb)push(astar(src,dst,"cost",new Set(rb.seq)),"alt2");
   const seen=new Set(),out=[];
-  for(const r of cands){const s=sig(r);if(!seen.has(s)){seen.add(s);out.push(r);}}
+  for(const r of cands){
+    if(rs&&r.meters>rs.meters*MAX_DETOUR)continue;  // no extreme detours
+    const s=sig(r);if(!seen.has(s)){seen.add(s);out.push(r);}
+  }
   out.sort((a,b)=>b.share-a.share||a.meters-b.meters);  // most cycleways first
   return out.slice(0,5);
 }
@@ -358,13 +374,14 @@ function tryRoute(){
 function updateSheet(){
   $("altChips").innerHTML=ALTS.map(r=>
     `<div class="chip ${r.key===selKey?"sel":""}" data-k="${r.key}">${LABEL[r.key]}` +
-    `<b>${etaMin(r.meters)} min</b>${(r.meters/1000).toFixed(1)} km · ${Math.round(r.share*100)}% 🚲</div>`).join("");
+    `<b>${etaMin(r.meters)} min</b>${(r.meters/1000).toFixed(1)} km · ${Math.round(r.share*100)}% 🚲`+
+    `${r.ele?`<br>↗${r.ele.up} m ↘${r.ele.down} m`:""}</div>`).join("");
   document.querySelectorAll("#altChips .chip").forEach(c=>
     c.addEventListener("click",()=>selectAlt(c.dataset.k)));
   const r=lastRoute, min=etaMin(r.meters);
   $("etaMin").textContent=min;
   $("routeSub").textContent=`${(r.meters/1000).toFixed(1)} km · arrive ${fmtClock(min)} · `+
-    `${Math.round(r.share*100)}% on cycleways`;
+    `${Math.round(r.share*100)}% 🚲${r.ele?` · ↗${r.ele.up} m`:""}`;
 }
 function selectAlt(k){
   if(!ALTS.some(r=>r.key===k))return;
@@ -575,6 +592,12 @@ function guide(cumPos,rem){
 
 // ---------- live navigation ----------
 let navWatch=null, navFollow=true, offCount=0, cum=null, cumTotal=0;
+let navT0=null, navTimerInt=null;
+function fmtDur(ms){
+  const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
+  return h?`${h}:${String(m%60).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`
+          :`${m}:${String(s%60).padStart(2,"0")}`;
+}
 
 function buildCum(){
   if(!lastRoute){cum=null;return;}
@@ -614,6 +637,9 @@ function startNav(){
     {enableHighAccuracy:true,maximumAge:1000,timeout:15000});
   show($("sheet"),false); show($("searchCard"),false);
   show($("navBar"),true); show($("turnBanner"),true);
+  document.body.classList.add("nav");
+  navT0=Date.now(); $("navTimer").textContent="⏱ 0:00";
+  navTimerInt=setInterval(()=>{$("navTimer").textContent="⏱ "+fmtDur(Date.now()-navT0);},1000);
   $("speedVal").textContent="–"; setSpeedVisible();
   const min=etaMin(lastRoute.meters);
   $("navMin").textContent=min;
@@ -624,6 +650,12 @@ function startNav(){
 function stopNav(){
   if(navWatch!==null){navigator.geolocation.clearWatch(navWatch);navWatch=null;}
   show($("navBar"),false); show($("turnBanner"),false);
+  document.body.classList.remove("nav");
+  if(navTimerInt!==null){clearInterval(navTimerInt);navTimerInt=null;}
+  if(navT0!==null){
+    const ms=Date.now()-navT0; navT0=null;
+    if(ms>10000)hint(`⏱ Ride time ${fmtDur(ms)}`,10000);
+  }
   if("speechSynthesis" in window)speechSynthesis.cancel();
   setSpeedVisible();
   $("recenter").style.display="none"; navFollow=true;
@@ -646,7 +678,7 @@ $("layersBtn").onclick=()=>{
 // ---------- load ----------
 fetch(GRAPH_URL).then(r=>{if(!r.ok)throw new Error(r.status);return r.json();})
  .then(d=>{
-   NODES=d.nodes; EDGES=d.edges;
+   NODES=d.nodes; EDGES=d.edges; ELEV=d.elev||null;
    ADJ=NODES.map(()=>[]);
    LEN=new Float64Array(EDGES.length);
    EDGES.forEach((e,i)=>{ADJ[e[0]].push([e[1],e[2],i]);LEN[i]=e[2]/MULT[e[3]];});

@@ -261,6 +261,22 @@ def build_export(G, klass_by_key):
     return {"nodes": nodes, "edges": edges_out}, dist
 
 
+def fetch_elevations(nodes):
+    """Node elevations (m) from Open-Meteo's free elevation API, batched."""
+    import requests
+    out = []
+    for i in range(0, len(nodes), 100):
+        chunk = nodes[i:i + 100]
+        r = requests.get(
+            "https://api.open-meteo.com/v1/elevation",
+            params={"latitude": ",".join(f"{p[0]:.6f}" for p in chunk),
+                    "longitude": ",".join(f"{p[1]:.6f}" for p in chunk)},
+            timeout=30)
+        r.raise_for_status()
+        out.extend(r.json()["elevation"])
+    return [round(e) if e is not None else 0 for e in out]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("geojson", help="your bike-class GeoJSON")
@@ -283,6 +299,13 @@ def main():
     else:
         kbk = classify(G, cls, args.buffer)
     export, dist = build_export(G, kbk)
+
+    try:
+        print("Fetching node elevations (Open-Meteo) ...")
+        export["elev"] = fetch_elevations(export["nodes"])
+        print(f"  elevations added for {len(export['elev'])} nodes")
+    except Exception as ex:  # elevation is optional — never fail the build
+        print(f"  WARNING: elevation fetch failed ({ex}); continuing without")
 
     Path(args.out).write_text(json.dumps(export, separators=(",", ":")))
     km = {k: round(v / 1000, 1) for k, v in dist.items()}
